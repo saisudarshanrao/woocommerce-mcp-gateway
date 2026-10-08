@@ -1,0 +1,255 @@
+{{- $name := include "store.wordpress.fullname" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "store.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# wp-content: uploads, plugins and themes. Kept on `helm uninstall`, like the
+# database volume and the Secret; deleting the namespace removes it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-content
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.wordpress.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.wordpress.persistence.size }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: wordpress
+spec:
+  replicas: 1
+  # The content volume is ReadWriteOnce, so the old pod has to release it
+  # before the new one starts. An upgrade is a short outage, not a rolling one.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "store.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: wordpress
+  template:
+    metadata:
+      labels:
+        {{- include "store.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: wordpress
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "store.wordpress.podSecurityContext" . | nindent 8 }}
+      initContainers:
+        # Installs and configures the store, then exits. It runs on every pod
+        # start and is safe to repeat; see images/wordpress/bin/store-setup.
+        # The admin password and the API key pair are given to this container
+        # only, so the long-running web container never holds them.
+        - name: setup
+          image: {{ include "store.wordpress.image" . | quote }}
+          imagePullPolicy: {{ .Values.wordpress.image.pullPolicy }}
+          command: [store-setup]
+          env:
+            {{- include "store.wordpress.env" . | nindent 12 }}
+            - name: STORE_TITLE
+              value: {{ .Values.store.title | quote }}
+            - name: STORE_COUNTRY
+              value: {{ .Values.store.country | quote }}
+            - name: STORE_CURRENCY
+              value: {{ .Values.store.currency | quote }}
+            - name: STORE_TIMEZONE
+              value: {{ .Values.store.timezone | quote }}
+            - name: STORE_SAMPLE_PRODUCTS
+              value: {{ .Values.store.sampleProducts | quote }}
+            - name: WP_ADMIN_USER
+              value: {{ .Values.store.adminUser | quote }}
+            - name: WP_ADMIN_EMAIL
+              value: {{ .Values.store.adminEmail | quote }}
+            - name: WP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "store.secretName" . }}
+                  key: wp-admin-password
+            - name: WC_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "store.secretName" . }}
+                  key: wc-consumer-key
+            - name: WC_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "store.secretName" . }}
+                  key: wc-consumer-secret
+          resources:
+            {{- toYaml .Values.wordpress.resources | nindent 12 }}
+          securityContext:
+            {{- include "store.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: webroot
+              mountPath: /var/www/html
+            - name: content
+              mountPath: /var/www/html/wp-content
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: wordpress
+          image: {{ include "store.wordpress.image" . | quote }}
+          imagePullPolicy: {{ .Values.wordpress.image.pullPolicy }}
+          # Setup already laid down the web root, so skip the image's entrypoint
+          # and run Apache directly.
+          command: [apache2-foreground]
+          env:
+            {{- include "store.wordpress.env" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          # Startup and readiness load a real WordPress page, so they pass only
+          # when PHP and the database both work. The headers make the request
+          # look like one for the public URL; otherwise WordPress redirects it.
+          startupProbe:
+            httpGet:
+              {{- include "store.wordpress.pageProbe" . | nindent 14 }}
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              {{- include "store.wordpress.pageProbe" . | nindent 14 }}
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Liveness asks Apache alone. A database outage must take the pod out
+          # of rotation (readiness) but not restart it, since a restart cannot
+          # fix the database.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.wordpress.resources | nindent 12 }}
+          securityContext:
+            {{- include "store.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: webroot
+              mountPath: /var/www/html
+            - name: content
+              mountPath: /var/www/html/wp-content
+            - name: tmp
+              mountPath: /tmp
+            - name: run
+              mountPath: /run
+      volumes:
+        # WordPress core, copied out of the image by the setup container. The
+        # root filesystem is read-only, so everything writable is a volume.
+        - name: webroot
+          emptyDir: {}
+        - name: content
+          persistentVolumeClaim:
+            claimName: {{ $name }}-content
+        - name: tmp
+          emptyDir: {}
+        # Apache's PID file and lock directory.
+        - name: run
+          emptyDir: {}
+{{- if .Values.wordpress.cron.enabled }}
+---
+# WordPress normally runs scheduled tasks when a visitor happens to load a page.
+# That is disabled in wp-config.php; this job requests wp-cron.php on a real
+# schedule instead, so WooCommerce's background work runs on a quiet store too.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}-cron
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cron
+spec:
+  schedule: {{ .Values.wordpress.cron.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 240
+      template:
+        metadata:
+          labels:
+            {{- include "store.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: cron
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- include "store.wordpress.podSecurityContext" . | nindent 12 }}
+          containers:
+            # The WordPress image is reused only because it has curl and is
+            # already on the node.
+            - name: wp-cron
+              image: {{ include "store.wordpress.image" . | quote }}
+              imagePullPolicy: {{ .Values.wordpress.image.pullPolicy }}
+              # The retries are not optional. A NetworkPolicy allows this pod
+              # by its labels, but the rule only learns a new pod's IP a moment
+              # after the pod starts, and curl connects within milliseconds.
+              # Until then the connection is refused.
+              command:
+                - curl
+                - --fail
+                - --silent
+                - --show-error
+                - --retry
+                - "5"
+                - --retry-delay
+                - "2"
+                - --retry-connrefused
+                - --max-time
+                - "200"
+                - --output
+                - /dev/null
+                - http://{{ $name }}/wp-cron.php?doing_wp_cron
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              securityContext:
+                {{- include "store.containerSecurityContext" . | nindent 16 }}
+{{- end }}

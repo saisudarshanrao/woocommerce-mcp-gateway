@@ -4,10 +4,21 @@ CLUSTER      := urumi
 KUBE_CONTEXT ?= k3d-$(CLUSTER)
 REGISTRY     ?= localhost:5001
 
+# Which values file to layer on each chart: values-$(ENV).yaml.
+ENV ?= local
+
 KUBECTL := kubectl --context $(KUBE_CONTEXT)
+HELM    := helm --kube-context $(KUBE_CONTEXT)
+
+STORE_NAMESPACE ?= store-main
+STORE_RELEASE   ?= store
+WORDPRESS_IMAGE := $(REGISTRY)/store-wordpress
+# The image tag is a hash of its source directory: see scripts/image-tag.sh.
+WORDPRESS_TAG    = $(shell ./scripts/image-tag.sh images/wordpress)
 
 .DEFAULT_GOAL := help
-.PHONY: help cluster-up cluster-stop cluster-down cluster-status cluster-smoke
+.PHONY: help cluster-up cluster-stop cluster-down cluster-status cluster-smoke \
+        store-image store-up store-down store-status store-logs store-password store-smoke
 
 help: ## List the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -30,3 +41,31 @@ cluster-status: ## Show nodes, workloads, ingresses and volumes
 
 cluster-smoke: ## Verify registry, storage, ingress and NetworkPolicy enforcement
 	@KUBE_CONTEXT=$(KUBE_CONTEXT) REGISTRY=$(REGISTRY) ./scripts/smoke-cluster.sh
+
+store-image: ## Build the store's WordPress image and push it to the registry
+	@./scripts/build-image.sh images/wordpress $(WORDPRESS_IMAGE)
+
+store-up: store-image ## Install or upgrade the store, then wait until it is ready
+	$(HELM) upgrade --install $(STORE_RELEASE) charts/store \
+		--namespace $(STORE_NAMESPACE) --create-namespace \
+		--values charts/store/values-$(ENV).yaml \
+		--set wordpress.image.tag=$(WORDPRESS_TAG) \
+		--wait --timeout 10m
+
+store-down: ## Remove the store and delete all of its data
+	-$(HELM) uninstall $(STORE_RELEASE) --namespace $(STORE_NAMESPACE)
+	$(KUBECTL) delete namespace $(STORE_NAMESPACE) --ignore-not-found
+
+store-status: ## Show the store's pods, volumes, ingress and network policies
+	@$(KUBECTL) -n $(STORE_NAMESPACE) get pods,pvc,ingress,networkpolicy
+
+store-logs: ## Show the setup log of the current WordPress pod
+	@$(KUBECTL) -n $(STORE_NAMESPACE) logs deploy/$(STORE_RELEASE)-wordpress -c setup
+
+store-password: ## Print the WordPress admin password
+	@$(KUBECTL) -n $(STORE_NAMESPACE) get secret $(STORE_RELEASE)-secrets \
+		-o jsonpath='{.data.wp-admin-password}' | base64 -d; echo
+
+store-smoke: ## Place a guest order through the storefront and check the admin sees it
+	@python3 scripts/smoke_store.py --context $(KUBE_CONTEXT) \
+		--namespace $(STORE_NAMESPACE) --release $(STORE_RELEASE)

@@ -1,0 +1,103 @@
+# One WooCommerce store: WordPress + WooCommerce, and its MariaDB.
+#
+# Install one release per namespace. The chart applies a namespace-wide
+# default-deny NetworkPolicy, so it assumes it owns the namespace it lands in.
+#
+# These defaults are the shared baseline. values-local.yaml and values-prod.yaml
+# hold everything that differs between a laptop and a VPS.
+
+nameOverride: ""
+fullnameOverride: ""
+
+imagePullSecrets: []
+
+store:
+  # Public hostname: the Ingress host, and the URL WordPress believes it has.
+  host: store.example.com
+  title: My Store
+  adminUser: admin
+  adminEmail: admin@example.com
+  # WooCommerce base location as COUNTRY:STATE, and currency as ISO 4217.
+  country: "US:CA"
+  currency: USD
+  # IANA timezone. "Orders placed today" means today in this zone.
+  timezone: UTC
+  # Create three sample products on first boot so the storefront is not empty.
+  sampleProducts: true
+
+ingress:
+  enabled: true
+  # Empty uses the cluster's default IngressClass.
+  className: ""
+  annotations: {}
+  tls:
+    # Also switches the store's own URL from http to https.
+    enabled: false
+    # Secret holding the certificate. Defaults to <release>-tls. With
+    # cert-manager, add its issuer annotation above and it creates this Secret.
+    secretName: ""
+
+secrets:
+  # By default the chart generates every credential once and keeps it across
+  # upgrades. To manage them yourself, name a Secret here that holds every key
+  # listed in templates/secret.yaml.
+  existingSecret: ""
+
+wordpress:
+  image:
+    # For example localhost:5001 or ghcr.io/<owner>. Empty means Docker Hub.
+    registry: ""
+    repository: store-wordpress
+    # Defaults to the chart's appVersion.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # WP_DEBUG. Errors go to the container log, never to the page.
+  debug: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # wp-content: uploads, plugins and themes. The size is fixed at first
+  # install: k3s's local-path storage cannot resize a volume.
+  persistence:
+    size: 5Gi
+    # Empty uses the cluster's default StorageClass.
+    storageClass: ""
+  # WordPress's scheduled tasks, triggered on a real schedule instead of by
+  # visitor traffic.
+  cron:
+    enabled: true
+    schedule: "*/5 * * * *"
+
+mariadb:
+  image:
+    repository: mariadb
+    tag: "11.8.9"
+    pullPolicy: IfNotPresent
+  database: wordpress
+  user: wordpress
+  # The main memory knob. Keep it well under the memory limit below.
+  innodbBufferPoolSize: 256M
+  maxConnections: 60
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 768Mi
+  persistence:
+    size: 5Gi
+    storageClass: ""
+
+networkPolicy:
+  enabled: true
+  # Which pods are "the ingress controller", the only outside caller allowed to
+  # reach WordPress. The default matches the Traefik that k3s installs.
+  ingressController:
+    namespace: kube-system
+    podLabels:
+      app.kubernetes.io/name: traefik

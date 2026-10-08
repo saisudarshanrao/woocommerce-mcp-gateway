@@ -1,0 +1,13 @@
+Store "{{ .Release.Name }}" is deploying into namespace {{ .Release.Namespace }}.
+
+  Storefront:  {{ include "store.url" . }}/
+  Admin:       {{ include "store.url" . }}/wp-admin/   (user: {{ .Values.store.adminUser }})
+
+The first start installs WordPress and WooCommerce and takes a minute or two.
+Follow it with:
+
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "store.wordpress.fullname" . }} -c setup -f
+
+Admin password:
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "store.secretName" . }} -o jsonpath='{.data.wp-admin-password}' | base64 -d

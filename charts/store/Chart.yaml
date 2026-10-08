@@ -1,0 +1,7 @@
+apiVersion: v2
+name: store
+description: One WooCommerce store (WordPress and MariaDB) in a namespace of its own
+type: application
+version: 0.1.0
+# WordPress core version and the WooCommerce version baked into the store image.
+appVersion: "7.1.3-wc11.2.0"

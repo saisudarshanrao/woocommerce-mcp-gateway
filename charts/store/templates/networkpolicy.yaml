@@ -1,0 +1,73 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $fullname := include "store.fullname" . }}
+# Nothing in this namespace accepts a connection unless a rule below allows it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-default-deny
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# WordPress: the ingress controller (the public path) and the cron job.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.wordpress.fullname" . }}
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "store.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: wordpress
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # namespaceSelector and podSelector in one entry means "pods with these
+        # labels in that namespace", not either one on its own.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressController.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.ingressController.podLabels | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- include "store.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: cron
+      ports:
+        - protocol: TCP
+          port: http
+---
+# MariaDB: WordPress is its only client, and it has no reason to open a
+# connection to anything, so its egress is closed completely.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.mariadb.fullname" . }}
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "store.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mariadb
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "store.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: wordpress
+      ports:
+        - protocol: TCP
+          port: mysql
+  egress: []
+{{- end }}

@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Converges this pod's WordPress + WooCommerce install to the desired state.
+#
+# Runs as the init container of the WordPress pod on every start, so each step
+# has to be safe to repeat. There are two kinds of step:
+#
+#   always       platform invariants: core files, plugin and theme versions,
+#                database migrations, the MCP server's API key
+#   first boot   store defaults that an admin may change later: the admin
+#                password, theme, currency, payment method, front page, sample
+#                products. A marker option guards them, so a restart never
+#                undoes work done in wp-admin.
+set -Eeuo pipefail
+
+log() { printf '[store-setup] %s\n' "$*"; }
+die() { printf '[store-setup] ERROR: %s\n' "$*" >&2; exit 1; }
+trap 'die "line ${LINENO}: ${BASH_COMMAND}"' ERR
+
+required=(
+  STORE_URL STORE_TITLE
+  WP_ADMIN_USER WP_ADMIN_PASSWORD WP_ADMIN_EMAIL
+  WORDPRESS_DB_HOST WORDPRESS_DB_NAME WORDPRESS_DB_USER WORDPRESS_DB_PASSWORD
+  WC_CONSUMER_KEY WC_CONSUMER_SECRET
+)
+for var in "${required[@]}"; do
+  [ -n "${!var:-}" ] || die "required environment variable ${var} is not set"
+done
+
+HELPERS=/usr/local/share/store-setup
+MARKER=store_setup_complete
+DB_WAIT_SECONDS="${DB_WAIT_SECONDS:-180}"
+
+cd /var/www/html
+as_admin() { wp --user="$WP_ADMIN_USER" "$@"; }
+
+# ensure_package <plugin|theme> <slug> <wanted version> <zip>
+# Installs when the package is missing or older than the version pinned in the
+# image. It never downgrades: a newer version on the volume was put there on
+# purpose, through wp-admin.
+ensure_package() {
+  local kind="$1" slug="$2" want="$3" zip="$4" have
+  have="$(wp "$kind" get "$slug" --field=version 2>/dev/null || true)"
+  if [ -n "$have" ] && php -r 'exit(version_compare($argv[1], $argv[2], ">=") ? 0 : 1);' "$have" "$want"; then
+    return 0
+  fi
+  log "installing ${kind} ${slug} ${want} (on volume: ${have:-none})"
+  wp "$kind" install "$zip" --force
+}
+
+# --- always -----------------------------------------------------------------
+
+# The web root is an emptyDir, so core is copied out of the image on every
+# start. It is copied entry by entry, not as one directory: the web root and
+# wp-content are mount points this user does not own, so their contents can be
+# written but their own mode and timestamps cannot.
+log "laying down WordPress core files"
+shopt -s dotglob nullglob
+for entry in /usr/src/wordpress/*; do
+  [ "${entry##*/}" = "wp-content" ] || cp -a "$entry" .
+done
+
+# wp-content is the persistent volume. Add what the image bundles, but never
+# replace a plugin or theme that is already there.
+mkdir -p wp-content/plugins wp-content/themes
+for entry in /usr/src/wordpress/wp-content/* /usr/src/wordpress/wp-content/{plugins,themes}/*; do
+  target="${entry#/usr/src/wordpress/}"
+  [ -e "$target" ] || cp -a "$entry" "$target"
+done
+shopt -u dotglob nullglob
+
+log "waiting for the database at ${WORDPRESS_DB_HOST}"
+deadline=$((SECONDS + DB_WAIT_SECONDS))
+until php -r '
+  mysqli_report(MYSQLI_REPORT_OFF);
+  $db = @mysqli_connect(getenv("WORDPRESS_DB_HOST"), getenv("WORDPRESS_DB_USER"), getenv("WORDPRESS_DB_PASSWORD"), getenv("WORDPRESS_DB_NAME"));
+  exit($db ? 0 : 1);
+'; do
+  [ "$SECONDS" -lt "$deadline" ] || die "database not reachable after ${DB_WAIT_SECONDS}s"
+  sleep 3
+done
+
+if ! wp core is-installed 2>/dev/null; then
+  log "installing WordPress"
+  # Installed with a throwaway password. The real one is set from the
+  # environment in the first-boot block below, so it never appears in a
+  # command line or in this log.
+  wp core install --url="$STORE_URL" --title="$STORE_TITLE" \
+    --admin_user="$WP_ADMIN_USER" --admin_email="$WP_ADMIN_EMAIL" \
+    --admin_password="$(head -c 24 /dev/urandom | base64)" --skip-email
+fi
+
+# A newer image can bring a newer core, plugin or theme; each has its own
+# database migration step.
+wp core update-db
+ensure_package plugin woocommerce "$WOOCOMMERCE_VERSION" /usr/src/store/woocommerce.zip
+ensure_package theme storefront "$STOREFRONT_VERSION" /usr/src/store/storefront.zip
+wp plugin is-active woocommerce || wp plugin activate woocommerce
+wp wc update
+
+log "registering the MCP server's API key"
+wp eval-file "${HELPERS}/seed-api-key.php"
+
+# --- first boot -------------------------------------------------------------
+
+if [ "$(wp option get "$MARKER" 2>/dev/null || true)" != "yes" ]; then
+  log "first boot: applying store defaults"
+
+  wp eval-file "${HELPERS}/set-admin-password.php"
+  # Pretty permalinks are what make /wp-json/ and /product/<slug>/ URLs work.
+  wp rewrite structure '/%postname%/'
+  wp theme activate storefront
+  wp option update timezone_string "${STORE_TIMEZONE:-UTC}"
+  wp option update woocommerce_default_country "${STORE_COUNTRY:-US:CA}"
+  wp option update woocommerce_currency "${STORE_CURRENCY:-USD}"
+
+  # A new WooCommerce store is hidden behind a "coming soon" page until launched.
+  wp option update woocommerce_coming_soon no
+  # Skip the onboarding wizard and decline usage tracking.
+  wp option update woocommerce_onboarding_profile '{"skipped":true}' --format=json
+  wp option update woocommerce_allow_tracking no
+
+  as_admin wc tool run install_pages
+  as_admin wc payment_gateway update cod --enabled=true
+
+  # Make the shop the front page, so products are the first thing a visitor sees.
+  wp option update show_on_front page
+  wp option update page_on_front "$(wp option get woocommerce_shop_page_id)"
+
+  # WordPress's placeholder post and page. Best effort: they are only clutter.
+  wp post delete 1 2 --force >/dev/null 2>&1 || true
+
+  if [ "${STORE_SAMPLE_PRODUCTS:-true}" = "true" ]; then
+    wp eval-file "${HELPERS}/sample-products.php"
+  fi
+
+  wp option update "$MARKER" yes
+fi
+
+log "done: ${STORE_URL}"

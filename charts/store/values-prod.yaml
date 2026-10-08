@@ -1,0 +1,29 @@
+# Production-like VPS (k3s). Applied on top of values.yaml.
+#
+# Three things have to be changed before use: the hostname, the admin email and
+# the image registry. TLS expects cert-manager with a ClusterIssuer of the name
+# given below.
+
+store:
+  host: store.example.com
+  title: Urumi Store
+  adminEmail: admin@example.com
+
+ingress:
+  className: traefik
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls:
+    enabled: true
+
+wordpress:
+  image:
+    registry: ghcr.io/OWNER
+    tag: "7.1.3-wc11.2.0"
+  persistence:
+    size: 10Gi
+
+mariadb:
+  innodbBufferPoolSize: 256M
+  persistence:
+    size: 10Gi
