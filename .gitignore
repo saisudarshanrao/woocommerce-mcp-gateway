@@ -1,0 +1,29 @@
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets never go in git: they are created as Kubernetes Secrets out of band
+.env
+.env.*
+!.env.example
+*.secret.yaml
+*.secrets.yaml
+kubeconfig*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Helm
+charts/*/charts/
+*.tgz

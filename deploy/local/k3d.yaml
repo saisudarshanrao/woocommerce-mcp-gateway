@@ -1,0 +1,53 @@
+# Local cluster: k3s-in-Docker via k3d.
+#
+# Why k3d: the production target is k3s on a VPS, so local runs the *same*
+# distribution with the same bundled components (Traefik ingress, ServiceLB,
+# local-path storage, kube-router NetworkPolicy controller). Nothing is disabled
+# or swapped out, so the Helm charts need only value changes between the two.
+#
+#   make cluster-up     # create (or start) this cluster
+#   make cluster-down   # delete it, including the registry and all volumes
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: urumi
+servers: 1
+agents: 0
+# Pinned to the k3s `stable` channel (what `curl -sfL https://get.k3s.io | sh -`
+# installs on a VPS today). Bump deliberately, together with the VPS.
+image: rancher/k3s:v1.36.5-k3s1
+kubeAPI:
+  hostIP: "127.0.0.1"
+  hostPort: "6550"
+ports:
+  # Host 80/443 -> k3d load balancer -> Traefik. Bound to loopback only, so the
+  # dev stack is never exposed on the LAN. *.localhost resolves to loopback
+  # (RFC 6761), which gives stable URLs with no /etc/hosts edits.
+  - port: 127.0.0.1:80:80
+    nodeFilters:
+      - loadbalancer
+  - port: 127.0.0.1:443:443
+    nodeFilters:
+      - loadbalancer
+registries:
+  # Host pushes and in-cluster pulls use the same reference:
+  #   localhost:5001/<image>:<tag>
+  # Docker only allows plain-HTTP pushes to `localhost`, so that is the name we
+  # push to; the mirror below makes k3s resolve the same name to the registry
+  # container. (5001 because macOS AirPlay Receiver owns 5000.)
+  create:
+    name: urumi-registry.localhost
+    host: "127.0.0.1"
+    hostPort: "5001"
+  config: |
+    mirrors:
+      "localhost:5001":
+        endpoint:
+          - http://urumi-registry.localhost:5000
+options:
+  k3d:
+    wait: true
+    timeout: "180s"
+  kubeconfig:
+    updateDefaultKubeconfig: true
+    switchCurrentContext: true
