@@ -1,4 +1,5 @@
-# One WooCommerce store: WordPress + WooCommerce, and its MariaDB.
+# One WooCommerce store: WordPress + WooCommerce, its MariaDB, and the MCP server
+# that exposes its products and orders as tools.
 #
 # Install one release per namespace. The chart applies a namespace-wide
 # default-deny NetworkPolicy, so it assumes it owns the namespace it lands in.
@@ -93,6 +94,26 @@ mariadb:
     size: 5Gi
     storageClass: ""
 
+# The store's MCP server. It has no Ingress: only the gateway may call it.
+wooMcp:
+  enabled: true
+  image:
+    registry: ""
+    repository: woo-mcp
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  logLevel: INFO
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# DNS suffix of the cluster, used to build the names the MCP server answers to.
+clusterDomain: cluster.local
+
 networkPolicy:
   enabled: true
   # Which pods are "the ingress controller", the only outside caller allowed to
@@ -101,3 +122,16 @@ networkPolicy:
     namespace: kube-system
     podLabels:
       app.kubernetes.io/name: traefik
+  # Which pods are "the gateway", the only caller allowed to reach the MCP
+  # server. These must match the labels the gateway chart puts on its API pods.
+  gateway:
+    namespace: gateway
+    podLabels:
+      app.kubernetes.io/name: gateway
+      app.kubernetes.io/component: api
+  # Where cluster DNS runs. The MCP server may talk to WordPress and to this,
+  # and to nothing else.
+  dns:
+    namespace: kube-system
+    podLabels:
+      k8s-app: kube-dns

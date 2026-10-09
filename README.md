@@ -7,8 +7,8 @@ API keys, an audit log, a dashboard and a chat agent.
 * Spec: [docs/ASSIGNMENT.md](docs/ASSIGNMENT.md)
 * Design and build order: [docs/PLAN.md](docs/PLAN.md)
 
-**Status:** the local cluster and the store (WordPress, WooCommerce, MariaDB) are
-built and verified. The WooCommerce MCP server, gateway, dashboard and chat agent
+**Status:** the local cluster, the store (WordPress, WooCommerce, MariaDB) and the
+store's MCP server are built and verified. The gateway, dashboard and chat agent
 come next.
 
 ## Prerequisites
@@ -33,6 +33,10 @@ colima start --cpu 4 --memory 8 --disk 40
 ```
 
 Docker Desktop or any other Docker engine works in place of Colima.
+
+Running the Python unit tests also needs [uv](https://docs.astral.sh/uv/)
+(`brew install uv`). Building and deploying does not: images are built inside
+Docker.
 
 ## Local cluster
 
@@ -78,7 +82,8 @@ What the chart creates, all in one namespace:
 | CronJob `store-wordpress-cron` | Triggers WordPress's scheduled tasks every five minutes |
 | Secret `store-secrets` | Every credential, generated on first install |
 | Ingress `store` | `store.localhost` to WordPress |
-| NetworkPolicies | Deny by default. Traefik and the cron job may reach WordPress; only WordPress may reach MariaDB; MariaDB may open no connection at all. |
+| Deployment `store-woo-mcp` | The store's MCP server. No Ingress: only the gateway may call it. |
+| NetworkPolicies | Deny by default. Traefik, the cron job and the MCP server may reach WordPress; only WordPress may reach MariaDB; only the gateway may reach the MCP server. MariaDB may open no connection at all, and the MCP server only to WordPress and DNS. |
 
 `helm uninstall` keeps the volumes and the Secret, so reinstalling brings the
 same store back. `make store-down` deletes the namespace and with it the data.
@@ -88,6 +93,20 @@ has no mail server. Volume sizes cannot be changed after the first install.
 
 The design, and why each piece is the way it is, is in
 [docs/PLAN.md](docs/PLAN.md#47-how-a-store-pod-is-put-together).
+
+## The store's MCP server
+
+[services/woo-mcp](services/woo-mcp) exposes the store's products and orders as
+MCP tools: list products, get product, create product, list orders, get order,
+update order status. Its [README](services/woo-mcp/README.md) covers how it
+talks to the store and why, what protects it, and what the protocol looks like
+on the wire. It is deployed by `make store-up` along with the rest of the store.
+
+```bash
+make mcp-test         # unit tests: the tools against a fake store (needs uv)
+make mcp-smoke        # the real thing: create a product, take an order, update it
+make isolation-smoke  # try every connection around the store; check which are blocked
+```
 
 ## Local domains
 
@@ -108,6 +127,7 @@ Production uses real DNS names and TLS, set in each chart's `values-prod.yaml`.
 ```
 charts/store/       Helm chart for one store: values.yaml plus values-local.yaml and values-prod.yaml
 images/wordpress/   The store image: Dockerfile, wp-config.php, setup script
+services/woo-mcp/   The WooCommerce MCP server (Python)
 deploy/local/       k3d cluster definition
 scripts/            Cluster bring-up, image build, smoke tests
 docs/               The assignment and the plan

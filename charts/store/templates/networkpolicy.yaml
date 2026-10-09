@@ -12,7 +12,8 @@ spec:
   policyTypes:
     - Ingress
 ---
-# WordPress: the ingress controller (the public path) and the cron job.
+# WordPress: the ingress controller (the public path), the cron job and the
+# store's MCP server.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -40,6 +41,12 @@ spec:
             matchLabels:
               {{- include "store.selectorLabels" . | nindent 14 }}
               app.kubernetes.io/component: cron
+        {{- if .Values.wooMcp.enabled }}
+        - podSelector:
+            matchLabels:
+              {{- include "store.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: woo-mcp
+        {{- end }}
       ports:
         - protocol: TCP
           port: http
@@ -70,4 +77,57 @@ spec:
         - protocol: TCP
           port: mysql
   egress: []
+{{- if .Values.wooMcp.enabled }}
+---
+# The MCP server: only the gateway's pods may call it, and it may call only
+# this store's WordPress, plus DNS to find it. It can reach neither the
+# database nor any other namespace, so a second store's MCP server could not
+# touch this one.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "store.wooMcp.fullname" . }}
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "store.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: woo-mcp
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.gateway.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.gateway.podLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: http
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "store.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: wordpress
+      ports:
+        - protocol: TCP
+          port: http
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dns.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.podLabels | nindent 14 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}
 {{- end }}

@@ -8,6 +8,13 @@ Follow it with:
 
   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "store.wordpress.fullname" . }} -c setup -f
 
+{{- if .Values.wooMcp.enabled }}
+MCP server, reachable only from inside the cluster and only by the gateway:
+
+  http://{{ include "store.wooMcp.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}/mcp
+  bearer token: key "mcp-auth-token" of Secret {{ include "store.secretName" . }}
+
+{{ end -}}
 Admin password:
 
   kubectl -n {{ .Release.Namespace }} get secret {{ include "store.secretName" . }} -o jsonpath='{.data.wp-admin-password}' | base64 -d

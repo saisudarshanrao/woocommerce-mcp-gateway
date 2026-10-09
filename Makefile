@@ -13,12 +13,15 @@ HELM    := helm --kube-context $(KUBE_CONTEXT)
 STORE_NAMESPACE ?= store-main
 STORE_RELEASE   ?= store
 WORDPRESS_IMAGE := $(REGISTRY)/store-wordpress
-# The image tag is a hash of its source directory: see scripts/image-tag.sh.
+WOO_MCP_IMAGE   := $(REGISTRY)/woo-mcp
+# An image's tag is a hash of its source directory: see scripts/image-tag.sh.
 WORDPRESS_TAG    = $(shell ./scripts/image-tag.sh images/wordpress)
+WOO_MCP_TAG      = $(shell ./scripts/image-tag.sh services/woo-mcp)
 
 .DEFAULT_GOAL := help
 .PHONY: help cluster-up cluster-stop cluster-down cluster-status cluster-smoke \
-        store-image store-up store-down store-status store-logs store-password store-smoke
+        store-image store-up store-down store-status store-logs store-password store-smoke \
+        mcp-test mcp-smoke isolation-smoke
 
 help: ## List the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -42,14 +45,16 @@ cluster-status: ## Show nodes, workloads, ingresses and volumes
 cluster-smoke: ## Verify registry, storage, ingress and NetworkPolicy enforcement
 	@KUBE_CONTEXT=$(KUBE_CONTEXT) REGISTRY=$(REGISTRY) ./scripts/smoke-cluster.sh
 
-store-image: ## Build the store's WordPress image and push it to the registry
+store-image: ## Build the store's images (WordPress, MCP server) and push them to the registry
 	@./scripts/build-image.sh images/wordpress $(WORDPRESS_IMAGE)
+	@./scripts/build-image.sh services/woo-mcp $(WOO_MCP_IMAGE)
 
 store-up: store-image ## Install or upgrade the store, then wait until it is ready
 	$(HELM) upgrade --install $(STORE_RELEASE) charts/store \
 		--namespace $(STORE_NAMESPACE) --create-namespace \
 		--values charts/store/values-$(ENV).yaml \
 		--set wordpress.image.tag=$(WORDPRESS_TAG) \
+		--set wooMcp.image.tag=$(WOO_MCP_TAG) \
 		--wait --timeout 10m
 
 store-down: ## Remove the store and delete all of its data
@@ -69,3 +74,14 @@ store-password: ## Print the WordPress admin password
 store-smoke: ## Place a guest order through the storefront and check the admin sees it
 	@python3 scripts/smoke_store.py --context $(KUBE_CONTEXT) \
 		--namespace $(STORE_NAMESPACE) --release $(STORE_RELEASE)
+
+mcp-test: ## Run the WooCommerce MCP server's unit tests
+	cd services/woo-mcp && uv run pytest -q
+
+mcp-smoke: ## Create a product, take an order and update it through the MCP tools
+	@python3 scripts/smoke_mcp.py --context $(KUBE_CONTEXT) \
+		--namespace $(STORE_NAMESPACE) --release $(STORE_RELEASE)
+
+isolation-smoke: ## Try every connection around the store and check which are blocked
+	@KUBE_CONTEXT=$(KUBE_CONTEXT) STORE_NAMESPACE=$(STORE_NAMESPACE) STORE_RELEASE=$(STORE_RELEASE) \
+		./scripts/smoke-isolation.sh

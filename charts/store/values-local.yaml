@@ -1,5 +1,5 @@
 # Local cluster (k3d). Applied on top of values.yaml by `make store-up`, which
-# also sets wordpress.image.tag to the content hash of images/wordpress.
+# also sets each image tag to the content hash of that image's source directory.
 
 store:
   host: store.localhost
@@ -17,6 +17,10 @@ wordpress:
       memory: 768Mi
   persistence:
     size: 1Gi
+
+wooMcp:
+  image:
+    registry: localhost:5001
 
 mariadb:
   innodbBufferPoolSize: 128M

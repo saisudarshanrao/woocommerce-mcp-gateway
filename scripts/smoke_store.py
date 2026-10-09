@@ -83,19 +83,52 @@ def wp_cli(args, *command):
     return result.stdout
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def place_guest_order(store_url, product_id, quantity=1):
+    """Buys a product as a guest, paying cash on delivery. Returns the order's id and total."""
+    store_api = f"{store_url}/wp-json/wc/store/v1"
+    # A cart belongs to a session. The Cart-Token header carries that session
+    # between requests, which is what a cookie does for the browser.
+    status, headers, cart = request("GET", f"{store_api}/cart")
+    token = headers.get("Cart-Token")
+    if status != 200 or not token:
+        raise Failure(f"could not open a cart (HTTP {status})")
+    session = {"Cart-Token": token, "Nonce": headers.get("Nonce", "")}
+
+    status, _, cart = request("POST", f"{store_api}/cart/add-item", {"id": product_id, "quantity": quantity}, session)
+    if status not in (200, 201):
+        raise Failure(f"add to cart failed (HTTP {status}): {api_error(cart)}")
+    totals = cart["totals"]
+    total = int(totals["total_price"]) / 10 ** totals["currency_minor_unit"]
+
+    status, _, checkout = request("POST", f"{store_api}/checkout", {
+        "billing_address": SHOPPER,
+        "shipping_address": {k: v for k, v in SHOPPER.items() if k != "email"},
+        "payment_method": "cod",
+    }, session)
+    if status != 200:
+        raise Failure(f"checkout failed (HTTP {status}): {api_error(checkout)}")
+    payment = checkout["payment_result"]["payment_status"]
+    if payment != "success":
+        raise Failure(f"order #{checkout['order_id']} was created but payment status is {payment!r}")
+    return {"id": checkout["order_id"], "status": checkout["status"], "total": total, "currency": totals["currency_code"]}
+
+
+def add_common_arguments(parser):
     parser.add_argument("--url", default="http://store.localhost", help="public URL of the store")
     parser.add_argument("--context", default="k3d-urumi", help="kube context")
     parser.add_argument("--namespace", default="store-main")
     parser.add_argument("--release", default="store", help="Helm release name")
     parser.add_argument("--admin-user", default="admin")
-    parser.add_argument("--keep", action="store_true", help="leave the test order in the store")
+    parser.add_argument("--keep", action="store_true", help="leave the test data in the store")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_common_arguments(parser)
     args = parser.parse_args()
-    store_api = f"{args.url}/wp-json/wc/store/v1"
 
     print(f"\n== storefront: {args.url}")
-    status, _, products = request("GET", f"{store_api}/products?per_page=20")
+    status, _, products = request("GET", f"{args.url}/wp-json/wc/store/v1/products?per_page=20")
     if status != 200:
         raise Failure(f"product listing returned HTTP {status}: {api_error(products)}")
     buyable = [p for p in products if p["is_purchasable"] and p["is_in_stock"]]
@@ -110,53 +143,29 @@ def main():
     ok("the front page shows it")
 
     print("\n== guest checkout with cash on delivery")
-    # A cart belongs to a session. The Cart-Token header carries that session
-    # between requests, which is what a cookie does for the browser.
-    status, headers, cart = request("GET", f"{store_api}/cart")
-    token = headers.get("Cart-Token")
-    if status != 200 or not token:
-        raise Failure(f"could not open a cart (HTTP {status})")
-    session = {"Cart-Token": token, "Nonce": headers.get("Nonce", "")}
-
-    status, _, cart = request("POST", f"{store_api}/cart/add-item", {"id": product["id"], "quantity": 2}, session)
-    if status not in (200, 201):
-        raise Failure(f"add to cart failed (HTTP {status}): {api_error(cart)}")
-    totals = cart["totals"]
-    minor = 10 ** totals["currency_minor_unit"]
-    ok(f"2 x {product['name']} in the cart, total {totals['currency_code']} {int(totals['total_price']) / minor:.2f}")
-
-    status, _, checkout = request("POST", f"{store_api}/checkout", {
-        "billing_address": SHOPPER,
-        "shipping_address": {k: v for k, v in SHOPPER.items() if k != "email"},
-        "payment_method": "cod",
-    }, session)
-    if status != 200:
-        raise Failure(f"checkout failed (HTTP {status}): {api_error(checkout)}")
-    order_id = checkout["order_id"]
-    payment = checkout["payment_result"]["payment_status"]
-    if payment != "success":
-        raise Failure(f"order #{order_id} was created but payment status is {payment!r}")
-    ok(f"order #{order_id} placed, status {checkout['status']!r}, payment {payment!r}")
+    placed = place_guest_order(args.url, product["id"], quantity=2)
+    ok(f"order #{placed['id']} placed for 2 x {product['name']}: {placed['currency']} {placed['total']:.2f}, "
+       f"status {placed['status']!r}")
 
     print("\n== the order as the shop admin sees it")
     try:
-        order = json.loads(wp_cli(args, "wc", "shop_order", "get", str(order_id), "--format=json"))
-        expected = int(totals["total_price"]) / minor
+        order = json.loads(wp_cli(args, "wc", "shop_order", "get", str(placed["id"]), "--format=json"))
         problems = []
         if order["payment_method"] != "cod":
             problems.append(f"payment method is {order['payment_method']!r}")
         if order["billing"]["email"] != SHOPPER["email"]:
             problems.append(f"billing email is {order['billing']['email']!r}")
-        if abs(float(order["total"]) - expected) > 0.005:
-            problems.append(f"total is {order['total']}, cart said {expected:.2f}")
+        if abs(float(order["total"]) - placed["total"]) > 0.005:
+            problems.append(f"total is {order['total']}, cart said {placed['total']:.2f}")
         if problems:
-            raise Failure(f"order #{order_id} does not match the checkout: " + "; ".join(problems))
+            raise Failure(f"order #{placed['id']} does not match the checkout: " + "; ".join(problems))
         items = ", ".join(f"{item['quantity']} x {item['name']}" for item in order["line_items"])
-        ok(f"order #{order_id}: {order['status']}, {order['currency']} {order['total']}, {order['payment_method_title']}, {items}")
+        ok(f"order #{placed['id']}: {order['status']}, {order['currency']} {order['total']}, "
+           f"{order['payment_method_title']}, {items}")
     finally:
         if not args.keep:
-            wp_cli(args, "wc", "shop_order", "delete", str(order_id), "--force=true")
-            ok(f"test order #{order_id} deleted")
+            wp_cli(args, "wc", "shop_order", "delete", str(placed["id"]), "--force=true")
+            ok(f"test order #{placed['id']} deleted")
 
     print("\nStore smoke test passed.")
 

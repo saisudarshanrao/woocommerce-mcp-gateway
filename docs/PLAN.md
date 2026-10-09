@@ -4,8 +4,8 @@ The spec is [ASSIGNMENT.md](ASSIGNMENT.md). This file records what gets built, i
 what order, and why each choice was made. Section 4 covers the mechanisms the
 brief asks to be documented and defended.
 
-**Status:** M0 (cluster) and M1 (store chart) are built and verified. Everything
-from M2 on is design, not yet built.
+**Status:** M0 (cluster), M1 (store chart) and M2 (WooCommerce MCP server) are
+built and verified. Everything from M3 on is design, not yet built.
 
 ## 1. Architecture
 
@@ -133,6 +133,10 @@ Checked on WooCommerce 11.2 over plain HTTP: Basic auth and keys in the query
 string both return 401, a correctly signed request returns 200, and a request
 signed with the wrong secret returns 401.
 
+The server is documented in
+[services/woo-mcp/README.md](../services/woo-mcp/README.md): its tools, the
+signing, what protects it, and what MCP looks like on the wire.
+
 ### 4.3 Tool name collisions
 
 Every tool is exposed as `<server-slug>__<tool>`, for example `woo__list_orders`.
@@ -158,13 +162,17 @@ Every tool is exposed as `<server-slug>__<tool>`, for example `woo__list_orders`
   failure becomes a tool result with `isError: true` and a message naming the
   server and the reason. The upstream is marked unreachable immediately, with
   that reason shown in the dashboard, and the probe keeps retrying.
-* Upstream sessions are short-lived: connect, initialize, call, close. A
-  restarted upstream pod therefore needs no session repair, and any gateway
-  replica can serve any request. Trade-off: upstreams that keep per-session
-  state are not supported.
-* The gateway's own `/mcp` endpoint is stateless for the same reason. It cannot
-  push `tools/list_changed`; a client sees a disabled server's tools disappear
-  on its next `tools/list`, and calls to them are rejected at once regardless.
+* The gateway keeps no upstream session. MCP's current revision, 2026-07-28, has
+  no handshake and no session at all: every call is one self-contained HTTP
+  request. A restarted upstream pod therefore needs no repair, and any gateway
+  replica can serve any request. An upstream that only speaks the older
+  protocol gets a fresh handshake for each call. Trade-off: an upstream that
+  keeps state between calls of one session is not supported.
+* The gateway's own `/mcp` endpoint serves both generations of the protocol and
+  keeps no session for either. A client sees a disabled server's tools
+  disappear on its next `tools/list`, and calls to them are rejected at once
+  regardless. Pushing a "tools changed" notification is a possible later
+  addition.
 
 ### 4.5 Where each credential lives
 
@@ -188,7 +196,9 @@ per-request lookup is also what makes revocation take effect on the next call.
 1. **Network.** MCP servers have a ClusterIP Service and nothing else: no
    Ingress, no NodePort. Their namespaces deny ingress by default and allow only
    the gateway pods. WordPress accepts Traefik and woo-mcp; MariaDB accepts only
-   WordPress; Postgres accepts only the gateway.
+   WordPress; Postgres accepts only the gateway. Outbound is restricted too:
+   woo-mcp may reach only its own WordPress and cluster DNS, and MariaDB
+   nothing. `make isolation-smoke` tries each connection and checks the result.
 2. **Application.** Each MCP server also requires a static credential that only
    the gateway holds, so a pod that slipped past the network rule still gets a 401.
 3. **Identity.** Every gateway request carries an API key or a session, is
@@ -267,7 +277,7 @@ Each milestone ends on something from the brief's definition of done.
 |---|---|---|
 | M0 | Cluster and skeleton | `make cluster-smoke` passes. **Done.** |
 | M1 | Store chart | By hand: storefront, add to cart, COD checkout, order visible in wp-admin. Data survives deleting both pods. **Done:** `make store-smoke` automates the checkout. |
-| M2 | woo-mcp | The five required tools work from MCP Inspector over a temporary port-forward. A pod in another namespace cannot connect. |
+| M2 | woo-mcp | The five required tools work from MCP Inspector over a temporary port-forward. A pod in another namespace cannot connect. **Done:** `make mcp-test`, `make mcp-smoke`, `make isolation-smoke`. |
 | M3 | Gateway core, plus tasks-mcp and sandbox-mcp | Claude Code, given only the gateway URL and a key, lists the tools of all three servers, answers the orders question and runs a two-server prompt. A revoked key is rejected. Killing one upstream pod leaves the others working. |
 | M4 | Dashboard | Every admin and member user story is clickable. No response body ever contains an upstream credential. |
 | M5 | Chat agent | Creates a product that appears on the storefront, then reports today's orders. Tool calls are shown in the chat and audited as the logged-in user. |
@@ -301,10 +311,24 @@ Confirmed while building M1:
 * **Default-deny also blocks Traefik** until the ingress controller is allowed
   explicitly. The store chart has that rule.
 
-Still open:
+Confirmed while building M2:
 
-* **MCP Python SDK is 2.x** (`MCPServer`, `Client`), released July 2026. Code is
-  written from its documentation, not from 1.x examples.
+* **MCP has a new protocol revision, 2026-07-28**, and the Python SDK 2.x speaks
+  it by default. It drops the handshake and sessions: each request is
+  self-contained. Older clients still use the `initialize` handshake, and the
+  SDK's servers answer both. This made the stateless design in 4.4 the
+  protocol's own model rather than a workaround.
+* **The SDK refuses unknown Host headers by default.** A server built with
+  `streamable_http_app()` answers only to localhost names until it is given an
+  allowlist; behind a Service name it returns 421. The chart passes the
+  Service's names. The gateway will need its public hostname listed.
+* **`kubectl port-forward` is not subject to NetworkPolicy.** It enters the pod
+  from the node, so it works where a pod-to-pod connection is refused. It is an
+  operator's path that needs cluster credentials, and the smoke tests use it.
+* **Signing against the public URL while sending to the internal Service works**
+  in the cluster, as 4.2 planned.
+
+Still open:
 * **Gemini free tier.** It is rate limited per minute and per day, so the chat
   agent must report a rate-limit error clearly instead of hanging. MCP tool
   schemas are JSON Schema and may need adapting to Gemini's function

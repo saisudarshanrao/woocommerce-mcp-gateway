@@ -28,6 +28,10 @@ and "store-mariadb" rather than "store-store-wordpress".
 {{- printf "%s-mariadb" (include "store.fullname" .) }}
 {{- end }}
 
+{{- define "store.wooMcp.fullname" -}}
+{{- printf "%s-woo-mcp" (include "store.fullname" .) }}
+{{- end }}
+
 {{/* Labels on every object. */}}
 {{- define "store.labels" -}}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | quote }}
@@ -58,6 +62,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $image := .Values.wordpress.image }}
 {{- $repository := ternary (printf "%s/%s" $image.registry $image.repository) $image.repository (not (empty $image.registry)) }}
 {{- printf "%s:%s" $repository ($image.tag | default .Chart.AppVersion) }}
+{{- end }}
+
+{{- define "store.wooMcp.image" -}}
+{{- $image := .Values.wooMcp.image }}
+{{- $repository := ternary (printf "%s/%s" $image.registry $image.repository) $image.repository (not (empty $image.registry)) }}
+{{- printf "%s:%s" $repository $image.tag }}
+{{- end }}
+
+{{/*
+Every name a caller inside the cluster can use for the MCP server's Service,
+plus the loopback names `kubectl port-forward` produces. The server answers
+only requests whose Host header is one of these.
+*/}}
+{{- define "store.wooMcp.allowedHosts" -}}
+{{- $name := include "store.wooMcp.fullname" . }}
+{{- $namespace := .Release.Namespace }}
+{{- list $name (printf "%s.%s" $name $namespace) (printf "%s.%s.svc" $name $namespace) (printf "%s.%s.svc.%s" $name $namespace .Values.clusterDomain) "localhost" "127.0.0.1" | join "," }}
 {{- end }}
 
 {{/*

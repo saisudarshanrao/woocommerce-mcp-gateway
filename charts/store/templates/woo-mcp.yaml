@@ -1,0 +1,119 @@
+{{- if .Values.wooMcp.enabled }}
+{{- $name := include "store.wooMcp.fullname" . }}
+# ClusterIP and nothing else: no Ingress and no NodePort, so the MCP server has
+# no address outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: woo-mcp
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "store.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: woo-mcp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: woo-mcp
+spec:
+  # Stateless, so unlike WordPress it can be replaced with a rolling update.
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "store.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: woo-mcp
+  template:
+    metadata:
+      labels:
+        {{- include "store.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: woo-mcp
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: woo-mcp
+          image: {{ include "store.wooMcp.image" . | quote }}
+          imagePullPolicy: {{ .Values.wooMcp.image.pullPolicy }}
+          env:
+            # Requests go to WordPress's Service. Their signatures are computed
+            # against the public URL, because that is the URL WooCommerce
+            # checks them against.
+            - name: STORE_INTERNAL_URL
+              value: "http://{{ include "store.wordpress.fullname" . }}"
+            - name: STORE_PUBLIC_URL
+              value: {{ include "store.url" . | quote }}
+            - name: WC_CONSUMER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "store.secretName" . }}
+                  key: wc-consumer-key
+            - name: WC_CONSUMER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "store.secretName" . }}
+                  key: wc-consumer-secret
+            - name: MCP_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "store.secretName" . }}
+                  key: mcp-auth-token
+            - name: MCP_ALLOWED_HOSTS
+              value: {{ include "store.wooMcp.allowedHosts" . | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.wooMcp.logLevel | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+          # /healthz reports that this process is serving. It does not ask the
+          # store: a store outage shows up as a clear error from each tool
+          # rather than as this pod leaving its Service.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.wooMcp.resources | nindent 12 }}
+          securityContext:
+            {{- include "store.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

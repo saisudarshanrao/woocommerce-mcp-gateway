@@ -23,6 +23,10 @@ wordpress:
   persistence:
     size: 10Gi
 
+wooMcp:
+  image:
+    registry: ghcr.io/OWNER
+
 mariadb:
   innodbBufferPoolSize: 256M
   persistence:
