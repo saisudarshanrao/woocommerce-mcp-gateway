@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, LogOut, MessageSquare, ScrollText, Server as ServerIcon, Users } from "lucide-react";
+import { KeyRound, LogOut, MessageSquare, ScrollText, Server as ServerIcon, Store as StoreIcon, Users } from "lucide-react";
 import type { ReactNode } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 
@@ -11,6 +11,7 @@ import { ChatPage } from "./pages/Chat";
 import { KeysPage } from "./pages/Keys";
 import { LoginPage } from "./pages/Login";
 import { ServersPage } from "./pages/Servers";
+import { StoresPage } from "./pages/Stores";
 import { TeamPage } from "./pages/Team";
 
 export function App() {
@@ -45,6 +46,7 @@ function SignedIn() {
           <Routes>
             <Route path="/" element={<Navigate to="/servers" replace />} />
             <Route path="/servers" element={<ServersPage user={user} />} />
+            <Route path="/stores" element={<StoresPage user={user} />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/keys" element={<KeysPage />} />
             <Route path="/audit" element={<AuditPage user={user} />} />
@@ -59,6 +61,8 @@ function SignedIn() {
 
 function Sidebar({ user }: { user: User }) {
   const queryClient = useQueryClient();
+  // The Stores page is offered only where the deployment runs the provisioner.
+  const config = useQuery({ queryKey: ["config"], queryFn: api.config });
   const logout = useMutation({
     mutationFn: api.logout,
     onSuccess: () => {
@@ -76,6 +80,7 @@ function Sidebar({ user }: { user: User }) {
       </div>
       <nav className="flex-1 space-y-1 px-2 pt-3 md:px-3 md:pt-0">
         <Item to="/servers" icon={<ServerIcon size={16} />} label="Servers" />
+        {config.data?.stores_enabled && <Item to="/stores" icon={<StoreIcon size={16} />} label="Stores" />}
         <Item to="/chat" icon={<MessageSquare size={16} />} label="Chat" />
         <Item to="/keys" icon={<KeyRound size={16} />} label="API keys" />
         {user.role === "admin" && <Item to="/team" icon={<Users size={16} />} label="Team" />}

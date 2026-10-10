@@ -1,0 +1,36 @@
+{{- if .Values.quota.enabled }}
+# A ceiling on what this store's namespace can use in total, so that one store
+# cannot starve the others of the node's memory, CPU or disk. Kubernetes checks
+# it whenever a pod or a volume is created here and refuses what would exceed it.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "store.fullname" . }}-quota
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  hard:
+    {{- toYaml .Values.quota.hard | nindent 4 }}
+---
+# Per-container rules in the same namespace. A quota on CPU and memory only
+# works if every container states what it needs, so a container that does not
+# is given the defaults below, and none may ask for more than the maximum.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ include "store.fullname" . }}-limits
+  labels:
+    {{- include "store.labels" . | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        {{- toYaml .Values.quota.container.defaultRequest | nindent 8 }}
+      default:
+        {{- toYaml .Values.quota.container.defaultLimit | nindent 8 }}
+      max:
+        {{- toYaml .Values.quota.container.max | nindent 8 }}
+    - type: PersistentVolumeClaim
+      max:
+        storage: {{ .Values.quota.maxVolumeSize }}
+{{- end }}

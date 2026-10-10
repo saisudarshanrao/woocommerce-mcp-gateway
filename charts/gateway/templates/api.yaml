@@ -96,6 +96,12 @@ spec:
               value: {{ join "," .Values.upstreams.internalHosts | quote }}
             - name: UPSTREAM_ALLOW_PUBLIC
               value: {{ .Values.upstreams.allowPublic | quote }}
+            - name: STORES_ENABLED
+              value: {{ .Values.provisioner.enabled | quote }}
+            - name: MAX_STORES_PER_USER
+              value: {{ .Values.provisioner.maxStoresPerUser | quote }}
+            - name: STORE_URL_TEMPLATE
+              value: "{{ ternary "https" "http" .Values.ingress.tls.enabled }}://{{ .Values.provisioner.hostTemplate }}"
             - name: RATE_LIMIT_PER_MINUTE
               value: {{ .Values.api.rateLimitPerMinute | quote }}
             - name: PROBE_INTERVAL_SECONDS

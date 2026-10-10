@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST
 
 from gateway import db, repo, seed
-from gateway.api import auth, chat, members, servers
+from gateway.api import auth, chat, members, servers, stores
 from gateway.api.deps import Parts
 from gateway.chat.llm import ChatModel
 from gateway.config import Settings
@@ -117,12 +117,16 @@ def create_app(
             "chat_enabled": app_parts.chat_model is not None,
             "chat_model": app_parts.chat_model.model if app_parts.chat_model else "",
             "rate_limit_per_minute": settings.rate_limit_per_minute,
+            "stores_enabled": settings.stores_enabled,
+            "max_stores_per_user": settings.max_stores_per_user,
+            "store_url_template": settings.store_url_template,
         }
 
     app.include_router(auth.router)
     app.include_router(members.router)
     app.include_router(servers.router)
     app.include_router(chat.router)
+    app.include_router(stores.router)
 
     @app.exception_handler(Exception)
     async def unexpected(_: Request, error: Exception) -> JSONResponse:

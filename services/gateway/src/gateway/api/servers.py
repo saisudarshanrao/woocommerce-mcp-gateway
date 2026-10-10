@@ -76,6 +76,8 @@ def server_json(server: Server, state: UpstreamState | None, viewer: User) -> di
         "latency_ms": live.latency_ms if live else None,
         "protocol_version": live.protocol_version if live else None,
         "member_access": server.member_access,
+        # True for the server of a store created from the dashboard.
+        "managed": server.store_id is not None,
         "tools": [
             {
                 "name": tool.tool.name,
@@ -175,6 +177,9 @@ async def change_server(
 @router.delete("/servers/{server_id}", status_code=204)
 async def remove_server(server_id: UUID, request: Request, _: User = Depends(admin_user)) -> None:
     app = parts(request)
+    server = await repo.get_server(app.pool, server_id)
+    if server and server.store_id:
+        raise HTTPException(409, "This server belongs to a store. Delete the store and it goes with it.")
     if not await repo.delete_server(app.pool, server_id):
         raise HTTPException(404, "No such server.")
     await app.upstreams.refresh(server_id)

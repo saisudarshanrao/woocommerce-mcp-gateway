@@ -510,3 +510,92 @@ async def test_metrics_are_served_for_prometheus_and_statistics_for_the_dashboar
 
     stats = (await admin.get("/api/stats")).json()
     assert stats == [{"server": "shop", "calls": 1, "failures": 0, "median_ms": stats[0]["median_ms"], "p95_ms": stats[0]["p95_ms"]}]
+
+
+# --- stores ------------------------------------------------------------------
+
+
+@pytest.fixture
+async def stores_app(pool, database_url, upstreams):
+    settings = Settings(
+        database_url=database_url, encryption_key="test-encryption-key", public_url=BASE,
+        bootstrap_admin_email=ADMIN["email"], bootstrap_admin_password=ADMIN["password"], probe_interval_seconds=3600,
+        stores_enabled=True, max_stores_per_user=2, store_url_template="http://{slug}.shops.test",
+    )
+    application = create_app(settings, http_client_factory=upstreams.http_client)
+    async with application.router.lifespan_context(application):
+        yield application
+
+
+async def test_anyone_signed_in_can_request_a_store_within_their_limit(stores_app, pool):
+    async with browser(stores_app) as admin:
+        await admin.post("/api/auth/login", json=ADMIN)
+        bob = await invite_member(stores_app, admin)
+
+        created = await bob.post("/api/stores", json={"name": "Bob's Books", "slug": "Books"})
+        assert created.status_code == 201, created.text
+        store = created.json()
+        assert (store["slug"], store["status"], store["namespace"]) == ("books", "provisioning", "store-books")
+        assert store["tool_prefix"] == "store-books__" and store["owner_email"] == "bob@example.com"
+
+        # Asking twice gives one store, not two.
+        again = await bob.post("/api/stores", json={"name": "Bob's Books", "slug": "books"})
+        assert again.status_code == 409 and "already a store" in again.json()["detail"]
+
+        for bad in ("9lives", "has_underscore", "ends-", "x" * 19, ""):
+            assert (await bob.post("/api/stores", json={"name": "Bad", "slug": bad})).status_code == 422, bad
+
+        assert (await bob.post("/api/stores", json={"name": "Second", "slug": "second"})).status_code == 201
+        over = await bob.post("/api/stores", json={"name": "Third", "slug": "third"})
+        assert over.status_code == 409 and "most one person may have" in over.json()["detail"]
+        # The limit is per person: the admin can still create one.
+        assert (await admin.post("/api/stores", json={"name": "Admin's", "slug": "third"})).status_code == 201
+
+        listed = (await bob.get("/api/stores")).json()
+        assert {(s["slug"], s["can_manage"]) for s in listed} == {("books", True), ("second", True), ("third", False)}
+        await bob.aclose()
+
+
+async def test_only_the_owner_or_an_admin_can_delete_or_retry_a_store(stores_app, pool):
+    async with browser(stores_app) as admin:
+        await admin.post("/api/auth/login", json=ADMIN)
+        bob = await invite_member(stores_app, admin)
+        mine = (await admin.post("/api/stores", json={"name": "Admin's", "slug": "admins"})).json()
+        bobs = (await bob.post("/api/stores", json={"name": "Bob's", "slug": "bobs"})).json()
+
+        assert (await bob.delete(f"/api/stores/{mine['id']}")).status_code == 403
+        assert (await bob.post(f"/api/stores/{mine['id']}/retry")).status_code == 403
+        # Retrying only makes sense for a store that failed.
+        assert (await bob.post(f"/api/stores/{bobs['id']}/retry")).status_code == 409
+        await pool.execute("UPDATE stores SET status = 'failed', detail = 'no room' WHERE slug = 'bobs'")
+        retried = await bob.post(f"/api/stores/{bobs['id']}/retry")
+        assert retried.status_code == 200 and retried.json()["status"] == "provisioning"
+
+        deleted = await admin.delete(f"/api/stores/{bobs['id']}")
+        assert deleted.status_code == 202 and deleted.json()["status"] == "deleting"
+        await bob.aclose()
+
+
+async def test_a_stores_server_cannot_be_removed_by_hand_and_goes_when_the_store_is_deleted(stores_app, pool):
+    async with browser(stores_app) as admin:
+        await admin.post("/api/auth/login", json=ADMIN)
+        created = (await admin.post("/api/stores", json={"name": "Books", "slug": "books"})).json()
+        store = await repo.get_store_by_slug(pool, "books")
+        await repo.register_store_server(pool, store, url="http://shop.test/mcp", auth_secret=CIPHER.encrypt("t"))
+
+        server = next(s for s in (await admin.get("/api/servers")).json() if s["slug"] == "store-books")
+        assert server["managed"] is True and server["name"] == "Books store"
+        refused = await admin.delete(f"/api/servers/{server['id']}")
+        assert refused.status_code == 409 and "Delete the store" in refused.json()["detail"]
+
+        # A store may not take the identifier of a server that already exists.
+        await add_server(pool, "store-taken", "warehouse.test")
+        assert (await admin.post("/api/stores", json={"name": "Taken", "slug": "taken"})).status_code == 409
+
+        await admin.delete(f"/api/stores/{created['id']}")
+        assert all(s["slug"] != "store-books" for s in (await admin.get("/api/servers")).json())
+
+
+async def test_the_stores_api_is_absent_unless_switched_on(app, admin):
+    assert (await admin.get("/api/stores")).status_code == 404
+    assert (await admin.get("/api/config")).json()["stores_enabled"] is False

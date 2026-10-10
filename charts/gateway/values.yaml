@@ -94,6 +94,50 @@ api:
       cpu: "1"
       memory: 384Mi
 
+# Stores created from the dashboard. Each one is an install of the store chart
+# into a namespace of its own (store-<slug>), with its own database, volumes,
+# Secrets and hostname, and its MCP server registered in the gateway
+# automatically. Off by default: it adds a component with (narrow) rights to
+# create namespaces. See templates/provisioner.yaml for exactly which.
+provisioner:
+  enabled: false
+  image:
+    registry: ""
+    # Built from services/gateway with the store chart baked in.
+    repository: gateway-provisioner
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  # Which of the store chart's own values files every new store starts from.
+  storeValuesFile: values-prod.yaml
+  # Laid over that file for every store. Anything the store chart accepts.
+  storeValues:
+    quota:
+      enabled: true
+  # A new store's public hostname; {slug} is the identifier chosen in the
+  # dashboard. In production this needs a wildcard DNS record.
+  hostTemplate: "{slug}.stores.example.com"
+  maxStoresPerUser: 3
+  # A store that is not up by then is marked failed, with what it was waiting for.
+  timeoutSeconds: 600
+  # How many stores are worked on at once.
+  maxConcurrent: 3
+  # Where the provisioner may reach the Kubernetes API. On k3s that is the
+  # node's own address on port 6443, so the default is "any private address";
+  # on a VPS whose node has a public address, put that address here as a /32.
+  apiServer:
+    cidrs:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+    ports: [443, 6443]
+  resources:
+    requests:
+      cpu: 25m
+      memory: 96Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
 dashboard:
   enabled: true
   image:

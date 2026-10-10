@@ -22,6 +22,30 @@ COPY migrations ./migrations
 RUN uv sync --frozen --no-dev --no-editable
 
 
+# The provisioner: the same code started differently (python -m
+# gateway.provisioner), plus the two things it needs to create stores: the helm
+# command and the store chart. It is a separate image so that the API, which
+# faces the internet, carries neither. Built with
+#   --target provisioner --build-context store-chart=charts/store
+FROM python:3.14-slim AS provisioner
+
+COPY --from=alpine/helm:4.3.0 /usr/bin/helm /usr/local/bin/helm
+COPY --from=store-chart . /charts/store
+COPY --from=build /app/.venv /app/.venv
+# The root filesystem is read-only at run time; helm keeps its files in /tmp.
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HOME=/tmp \
+    HELM_CACHE_HOME=/tmp/helm/cache \
+    HELM_CONFIG_HOME=/tmp/helm/config \
+    HELM_DATA_HOME=/tmp/helm/data
+
+USER 10001:10001
+ENTRYPOINT ["python", "-m", "gateway.provisioner"]
+
+
+# The API. Last in the file, so it is what a plain `docker build` produces.
 FROM python:3.14-slim
 
 COPY --from=build /app/.venv /app/.venv

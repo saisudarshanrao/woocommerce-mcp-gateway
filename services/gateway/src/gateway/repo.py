@@ -64,6 +64,31 @@ class Server:
     member_access: str
     created_at: datetime
     updated_at: datetime
+    # Set when the server belongs to a store created from the dashboard.
+    store_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class Store:
+    id: UUID
+    slug: str
+    name: str
+    owner_id: UUID | None
+    owner_email: str
+    status: str
+    detail: str | None
+    url: str | None
+    created_at: datetime
+    started_at: datetime
+
+    @property
+    def namespace(self) -> str:
+        return f"store-{self.slug}"
+
+    @property
+    def server_slug(self) -> str:
+        """The store's identifier in the gateway, and so the prefix of its tools."""
+        return f"store-{self.slug}"
 
 
 @dataclass(frozen=True)
@@ -91,7 +116,7 @@ def _to(cls, row: asyncpg.Record | None):
 USER_COLUMNS = "id, email, name, role, active, created_at"
 SERVER_COLUMNS = (
     "id, slug, name, url, auth_type, auth_header, auth_secret, enabled, timeout_seconds, member_access, "
-    "created_at, updated_at"
+    "created_at, updated_at, store_id"
 )
 
 # --- users -------------------------------------------------------------------
@@ -419,3 +444,107 @@ async def count_call(pool: asyncpg.Pool, subject: str) -> int:
         "RETURNING calls",
         subject,
     )
+
+
+# --- stores --------------------------------------------------------------------
+
+STORE_COLUMNS = "id, slug, name, owner_id, owner_email, status, detail, url, created_at, started_at"
+
+
+async def create_store(pool: asyncpg.Pool, *, slug: str, name: str, owner: User, limit: int) -> Store | None:
+    """Records a request for a new store. None if the owner already has `limit` stores.
+
+    Two requests from one person arriving together must not both slip under
+    the limit, so the count and the insert happen under a lock on that person,
+    held until the transaction ends.
+    """
+    async with pool.acquire() as connection, connection.transaction():
+        await connection.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", f"stores:{owner.id}")
+        if await connection.fetchval("SELECT count(*) FROM stores WHERE owner_id = $1", owner.id) >= limit:
+            return None
+        row = await connection.fetchrow(
+            f"INSERT INTO stores (slug, name, owner_id, owner_email, detail) "
+            f"VALUES ($1, $2, $3, $4, 'Waiting for the provisioner') RETURNING {STORE_COLUMNS}",
+            slug, name, owner.id, owner.email,
+        )
+        return _to(Store, row)
+
+
+async def list_stores(pool: asyncpg.Pool, statuses: tuple[str, ...] | None = None) -> list[Store]:
+    rows = await pool.fetch(
+        f"SELECT {STORE_COLUMNS} FROM stores WHERE ($1::text[] IS NULL OR status = ANY($1)) ORDER BY created_at",
+        list(statuses) if statuses else None,
+    )
+    return [_to(Store, row) for row in rows]
+
+
+async def get_store(pool: asyncpg.Pool, store_id: UUID) -> Store | None:
+    return _to(Store, await pool.fetchrow(f"SELECT {STORE_COLUMNS} FROM stores WHERE id = $1", store_id))
+
+
+async def get_store_by_slug(pool: asyncpg.Pool, slug: str) -> Store | None:
+    return _to(Store, await pool.fetchrow(f"SELECT {STORE_COLUMNS} FROM stores WHERE slug = $1", slug))
+
+
+async def set_store_detail(pool: asyncpg.Pool, store_id: UUID, detail: str) -> None:
+    """Says what is happening to a store that is still being provisioned or deleted."""
+    await pool.execute(
+        "UPDATE stores SET detail = $2, updated_at = now() "
+        "WHERE id = $1 AND status IN ('provisioning', 'deleting') AND detail IS DISTINCT FROM $2",
+        store_id, detail[:500],
+    )
+
+
+async def finish_store(pool: asyncpg.Pool, store_id: UUID, status: str, detail: str | None, url: str | None = None) -> bool:
+    """Ends a provisioning attempt as 'ready' or 'failed'. False if the store is no longer being provisioned."""
+    result = await pool.execute(
+        "UPDATE stores SET status = $2, detail = $3, url = COALESCE($4, url), updated_at = now() "
+        "WHERE id = $1 AND status = 'provisioning'",
+        store_id, status, detail[:500] if detail else None, url,
+    )
+    return result == "UPDATE 1"
+
+
+async def retry_store(pool: asyncpg.Pool, store_id: UUID) -> Store | None:
+    """Puts a failed store back in the queue, with a fresh timeout."""
+    row = await pool.fetchrow(
+        f"UPDATE stores SET status = 'provisioning', detail = 'Waiting for the provisioner', "
+        f"started_at = now(), updated_at = now() WHERE id = $1 AND status = 'failed' RETURNING {STORE_COLUMNS}",
+        store_id,
+    )
+    return _to(Store, row)
+
+
+async def mark_store_deleting(pool: asyncpg.Pool, store_id: UUID) -> Store | None:
+    """Asks for a store to be removed. Its tools leave the gateway in the same transaction."""
+    async with pool.acquire() as connection, connection.transaction():
+        row = await connection.fetchrow(
+            f"UPDATE stores SET status = 'deleting', detail = 'Waiting for the provisioner', updated_at = now() "
+            f"WHERE id = $1 RETURNING {STORE_COLUMNS}",
+            store_id,
+        )
+        if row is not None:
+            await connection.execute("DELETE FROM upstream_servers WHERE store_id = $1", store_id)
+        return _to(Store, row)
+
+
+async def delete_store(pool: asyncpg.Pool, store_id: UUID) -> None:
+    """Forgets a store whose resources are gone. Any registration left goes with it."""
+    await pool.execute("DELETE FROM stores WHERE id = $1 AND status = 'deleting'", store_id)
+
+
+async def register_store_server(pool: asyncpg.Pool, store: Store, *, url: str, auth_secret: bytes) -> bool:
+    """Registers the store's MCP server in the gateway, or refreshes its registration.
+
+    Safe to repeat. False if the identifier is taken by a server that is not this store's.
+    """
+    result = await pool.fetchval(
+        "INSERT INTO upstream_servers (slug, name, url, auth_type, auth_secret, store_id) "
+        "VALUES ($1, $2, $3, 'bearer', $4, $5) "
+        "ON CONFLICT (slug) DO UPDATE SET url = EXCLUDED.url, auth_type = 'bearer', auth_header = NULL, "
+        "auth_secret = EXCLUDED.auth_secret, updated_at = now() "
+        "WHERE upstream_servers.store_id = EXCLUDED.store_id "
+        "RETURNING id",
+        store.server_slug, f"{store.name} store", url, auth_secret, store.id,
+    )
+    return result is not None

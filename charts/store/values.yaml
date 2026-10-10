@@ -111,6 +111,35 @@ wooMcp:
       cpu: 500m
       memory: 256Mi
 
+# Limits on the namespace as a whole. Off for a store an operator installs by
+# hand; the gateway's provisioner switches it on for every store it creates.
+# The totals leave room for this chart's own pods (about 250m CPU and 650Mi of
+# memory requested) plus a second MCP server pod during a rolling update.
+quota:
+  enabled: false
+  hard:
+    pods: "8"
+    requests.cpu: 500m
+    requests.memory: 1Gi
+    limits.cpu: "4"
+    limits.memory: 3Gi
+    persistentvolumeclaims: "2"
+    requests.storage: 12Gi
+    # A store is reached through the Ingress and has no business opening ports of its own.
+    services.loadbalancers: "0"
+    services.nodeports: "0"
+  container:
+    defaultRequest:
+      cpu: 25m
+      memory: 64Mi
+    defaultLimit:
+      cpu: 250m
+      memory: 256Mi
+    max:
+      cpu: "2"
+      memory: 2Gi
+  maxVolumeSize: 10Gi
+
 # DNS suffix of the cluster, used to build the names the MCP server answers to.
 clusterDomain: cluster.local
 

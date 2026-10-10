@@ -29,6 +29,11 @@ class Settings:
     # addresses the gateway will connect to. See urlguard.py.
     upstream_internal_hosts: tuple[str, ...] = ()
     upstream_allow_public: bool = True
+    # Whether stores can be created from the dashboard. Needs the provisioner running.
+    stores_enabled: bool = False
+    max_stores_per_user: int = 3
+    # What a new store's address will be, with {slug} for its identifier. Shown in the form.
+    store_url_template: str = ""
     # Tool calls one API key (or one person in the chat) may make per minute. 0 is no limit.
     rate_limit_per_minute: int = 0
     probe_interval_seconds: float = 10.0
@@ -74,6 +79,9 @@ class Settings:
             extra_allowed_hosts=listed("EXTRA_ALLOWED_HOSTS"),
             upstream_internal_hosts=listed("UPSTREAM_INTERNAL_HOSTS"),
             upstream_allow_public=env.get("UPSTREAM_ALLOW_PUBLIC", "true").strip().lower() != "false",
+            stores_enabled=env.get("STORES_ENABLED", "false").strip().lower() == "true",
+            max_stores_per_user=int(env.get("MAX_STORES_PER_USER", "3")),
+            store_url_template=env.get("STORE_URL_TEMPLATE", "").strip(),
             rate_limit_per_minute=int(env.get("RATE_LIMIT_PER_MINUTE", "0")),
             probe_interval_seconds=float(env.get("PROBE_INTERVAL_SECONDS", "10")),
             probe_timeout_seconds=float(env.get("PROBE_TIMEOUT_SECONDS", "5")),

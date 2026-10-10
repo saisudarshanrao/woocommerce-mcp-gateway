@@ -37,6 +37,8 @@ export interface Server {
   latency_ms: number | null;
   protocol_version: string | null;
   member_access: MemberAccess;
+  // True for the server of a store created from the dashboard.
+  managed: boolean;
   tools: Tool[];
   skipped_tools: { name: string; reason: string }[];
   // The three below are sent to admins only. The credential itself is never sent.
@@ -107,6 +109,27 @@ export interface Config {
   chat_enabled: boolean;
   chat_model: string;
   rate_limit_per_minute: number;
+  stores_enabled: boolean;
+  max_stores_per_user: number;
+  // For example "http://{slug}.localhost".
+  store_url_template: string;
+}
+
+export type StoreStatus = "provisioning" | "ready" | "failed" | "deleting";
+
+export interface Store {
+  id: string;
+  slug: string;
+  name: string;
+  status: StoreStatus;
+  // What is happening right now or, for a failed store, why it failed.
+  detail: string | null;
+  url: string | null;
+  namespace: string;
+  tool_prefix: string;
+  owner_email: string;
+  created_at: string;
+  can_manage: boolean;
 }
 
 export class ApiError extends Error {
@@ -170,6 +193,11 @@ export const api = {
     for (const [key, value] of Object.entries(filters)) if (value) query.set(key, String(value));
     return request<AuditEntry[]>("GET", `/api/audit?${query}`);
   },
+  stores: () => request<Store[]>("GET", "/api/stores"),
+  createStore: (name: string, slug: string) => request<Store>("POST", "/api/stores", { name, slug }),
+  retryStore: (id: string) => request<Store>("POST", `/api/stores/${id}/retry`),
+  deleteStore: (id: string) => request<Store>("DELETE", `/api/stores/${id}`),
+
   stats: (hours = 24) => request<ServerStats[]>("GET", `/api/stats?hours=${hours}`),
 };
 

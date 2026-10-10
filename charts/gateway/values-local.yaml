@@ -29,3 +29,13 @@ dashboard:
 postgres:
   persistence:
     size: 1Gi
+
+# Stores from the dashboard appear at <slug>.localhost, which resolves to this
+# machine like every other *.localhost name. `make gateway-up` also sets the
+# image tags for new stores to the ones the first store runs.
+provisioner:
+  enabled: true
+  image:
+    registry: localhost:5001
+  storeValuesFile: values-local.yaml
+  hostTemplate: "{slug}.localhost"

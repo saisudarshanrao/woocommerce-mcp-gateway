@@ -37,3 +37,21 @@ dashboard:
 postgres:
   persistence:
     size: 10Gi
+
+# Stores from the dashboard. Point a wildcard DNS record (*.stores.example.com)
+# at the server, and set the image tags for new stores under storeValues.
+provisioner:
+  enabled: true
+  image:
+    registry: ghcr.io/OWNER
+  storeValuesFile: values-prod.yaml
+  hostTemplate: "{slug}.stores.example.com"
+  storeValues:
+    quota:
+      enabled: true
+    wordpress:
+      image:
+        registry: ghcr.io/OWNER
+    wooMcp:
+      image:
+        registry: ghcr.io/OWNER

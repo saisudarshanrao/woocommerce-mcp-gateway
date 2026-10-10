@@ -37,6 +37,10 @@ GATEWAY_RELEASE   ?= gateway
 GATEWAY_IMAGE     := $(REGISTRY)/gateway
 DASHBOARD_IMAGE   := $(REGISTRY)/gateway-dashboard
 GATEWAY_TAG        = $(shell ./scripts/image-tag.sh services/gateway)
+# The provisioner image holds the gateway's code and the store chart, so its
+# tag is a hash of both.
+PROVISIONER_IMAGE := $(REGISTRY)/gateway-provisioner
+PROVISIONER_TAG    = $(shell ./scripts/image-tag.sh services/gateway charts/store)
 DASHBOARD_TAG      = $(shell ./scripts/image-tag.sh services/dashboard)
 
 .DEFAULT_GOAL := help
@@ -45,7 +49,7 @@ DASHBOARD_TAG      = $(shell ./scripts/image-tag.sh services/dashboard)
         mcp-test mcp-smoke isolation-smoke \
         mcp-servers-up mcp-servers-down tasks-token \
         gateway-image gateway-up gateway-down gateway-status gateway-logs gateway-password gateway-test gateway-smoke \
-        llm-key up down smoke test
+        stores-smoke llm-key up down smoke test
 
 help: ## List the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -127,19 +131,28 @@ mcp-servers-down: ## Remove the two extra MCP servers
 tasks-token: ## Print the credential the tasks server expects (header X-API-Key)
 	@$(KUBECTL) -n $(MCP_NAMESPACE) get secret tasks-mcp-auth -o jsonpath='{.data.token}' | base64 -d; echo
 
-gateway-image: ## Build the gateway's images (API, dashboard) and push them to the registry
+gateway-image: ## Build the gateway's images (API, provisioner, dashboard) and push them to the registry
 	@./scripts/build-image.sh services/gateway $(GATEWAY_IMAGE)
+	@IMAGE_TAG=$(PROVISIONER_TAG) BUILD_ARGS="--target provisioner --build-context store-chart=charts/store" \
+		./scripts/build-image.sh services/gateway $(PROVISIONER_IMAGE)
 	@./scripts/build-image.sh services/dashboard $(DASHBOARD_IMAGE)
 
-gateway-up: gateway-image ## Install or upgrade the gateway, then wait until it is ready
+# The store images are built too: stores created from the dashboard run them.
+gateway-up: gateway-image store-image ## Install or upgrade the gateway, then wait until it is ready
 	$(HELM) upgrade --install $(GATEWAY_RELEASE) charts/gateway \
 		--namespace $(GATEWAY_NAMESPACE) --create-namespace \
 		--values charts/gateway/values-$(ENV).yaml \
 		--set api.image.registry=$(REGISTRY) --set api.image.tag=$(GATEWAY_TAG) \
 		--set dashboard.image.registry=$(REGISTRY) --set dashboard.image.tag=$(DASHBOARD_TAG) \
+		--set provisioner.image.registry=$(REGISTRY) --set provisioner.image.tag=$(PROVISIONER_TAG) \
+		--set provisioner.storeValues.wordpress.image.registry=$(REGISTRY) \
+		--set provisioner.storeValues.wordpress.image.tag=$(WORDPRESS_TAG) \
+		--set provisioner.storeValues.wooMcp.image.registry=$(REGISTRY) \
+		--set provisioner.storeValues.wooMcp.image.tag=$(WOO_MCP_TAG) \
 		--wait --timeout 10m
 
-gateway-down: ## Remove the gateway and delete all of its data
+gateway-down: ## Remove the gateway, every store created from its dashboard, and all of their data
+	-$(KUBECTL) delete namespace --selector mcp-gateway/store --ignore-not-found
 	-$(HELM) uninstall $(GATEWAY_RELEASE) --namespace $(GATEWAY_NAMESPACE)
 	$(KUBECTL) delete namespace $(GATEWAY_NAMESPACE) --ignore-not-found
 
@@ -177,4 +190,8 @@ test: ## Run every unit test suite
 	cd services/demo-mcp && uv run pytest -q
 	cd services/gateway && uv run pytest -q
 
-smoke: store-smoke mcp-smoke gateway-smoke isolation-smoke ## Run every end-to-end check against the cluster
+stores-smoke: ## Create two stores from the dashboard's API, compare their orders, check isolation, delete one
+	@python3 scripts/smoke_stores.py --url $(GATEWAY_URL) --context $(KUBE_CONTEXT) \
+		--namespace $(GATEWAY_NAMESPACE) --release $(GATEWAY_RELEASE)
+
+smoke: store-smoke mcp-smoke gateway-smoke isolation-smoke stores-smoke ## Run every end-to-end check against the cluster

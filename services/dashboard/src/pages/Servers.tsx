@@ -67,6 +67,7 @@ function ServerCard({ server, isAdmin, onEdit }: { server: Server; isAdmin: bool
             <h2 className="text-base font-semibold">{server.name}</h2>
             <Badge tone={status.tone}>{status.label}</Badge>
             <code className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">{server.slug}__</code>
+            {server.managed && <Badge tone="blue">store</Badge>}
           </div>
           {server.status === "unreachable" && (
             <p className="mt-1.5 flex items-center gap-1.5 text-sm text-rose-700">
@@ -105,14 +106,17 @@ function ServerCard({ server, isAdmin, onEdit }: { server: Server; isAdmin: bool
             <Button size="sm" onClick={onEdit}>
               Edit
             </Button>
-            <Button
-              size="sm"
-              variant="danger"
-              disabled={remove.isPending}
-              onClick={() => window.confirm(`Remove ${server.name}? Its tools will disappear for everyone.`) && remove.mutate()}
-            >
-              Remove
-            </Button>
+            {/* A store's server is removed by deleting the store, on the Stores page. */}
+            {!server.managed && (
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={remove.isPending}
+                onClick={() => window.confirm(`Remove ${server.name}? Its tools will disappear for everyone.`) && remove.mutate()}
+              >
+                Remove
+              </Button>
+            )}
           </div>
         )}
       </div>

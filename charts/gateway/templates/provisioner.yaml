@@ -1,0 +1,256 @@
+{{- if .Values.provisioner.enabled }}
+{{- $fullname := include "gateway.fullname" . }}
+{{- $name := printf "%s-provisioner" $fullname }}
+{{- $installer := printf "%s-store-installer" $fullname }}
+# The provisioner creates and removes the stores people ask for in the
+# dashboard. It is the only component that talks to the Kubernetes API, and it
+# is kept apart from the API pods for that reason: the part of the system that
+# faces the internet holds no cluster credentials at all.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+---
+# What the provisioner may do across the cluster. It is deliberately very
+# little: create and delete namespaces, and hand itself one specific role
+# inside a namespace. It cannot read a Secret or touch a workload anywhere on
+# the strength of this role alone.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, create, delete]
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [rolebindings]
+    verbs: [create]
+  # "bind" is what allows creating a RoleBinding to a role whose permissions
+  # the creator does not already hold. It is limited to the one role below.
+  - apiGroups: [rbac.authorization.k8s.io]
+    resources: [clusterroles]
+    verbs: [bind]
+    resourceNames: [{{ $installer }}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+# What installing one store takes: exactly the kinds of object the store chart
+# contains, plus reading pods to report progress. This role is never bound
+# across the cluster. The provisioner binds it to itself inside each store's
+# namespace, so it holds these permissions there and nowhere else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $installer }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets, services, persistentvolumeclaims, resourcequotas, limitranges]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+---
+# RBAC cannot say "only in namespaces you created": the rules above would let
+# the provisioner delete any namespace, or grant itself the installer role in
+# kube-system. This admission policy closes that. Kubernetes evaluates it on
+# every create or delete the provisioner attempts on the kinds listed, and
+# refuses unless the namespace carries the label that only the provisioner's
+# own namespaces have. The provisioner cannot add that label to a namespace
+# that exists: it has no permission to update one.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}-scope
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "DELETE"]
+        resources: ["namespaces"]
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["rolebindings"]
+  matchConditions:
+    - name: is-the-provisioner
+      expression: 'request.userInfo.username == "system:serviceaccount:{{ .Release.Namespace }}:{{ $name }}"'
+  validations:
+    - expression: >-
+        request.kind.kind != "Namespace" || request.operation != "CREATE" ||
+        (object.metadata.name.startsWith("store-") && has(object.metadata.labels) &&
+        "mcp-gateway/store" in object.metadata.labels &&
+        object.metadata.labels["mcp-gateway/store"] == object.metadata.name.substring(6))
+      message: The provisioner may only create namespaces named store-<slug> that carry the label mcp-gateway/store=<slug>.
+    - expression: >-
+        request.kind.kind != "Namespace" || request.operation != "DELETE" ||
+        (has(oldObject.metadata.labels) && "mcp-gateway/store" in oldObject.metadata.labels)
+      message: The provisioner may only delete namespaces it created.
+    - expression: >-
+        request.kind.kind != "RoleBinding" ||
+        (has(namespaceObject.metadata.labels) && "mcp-gateway/store" in namespaceObject.metadata.labels)
+      message: The provisioner may only grant itself permissions inside namespaces it created.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}-scope
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}-scope
+  validationActions: [Deny]
+---
+# Values laid over the store chart's own values file for every store.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+data:
+  values.yaml: |
+    {{- toYaml .Values.provisioner.storeValues | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+spec:
+  # Never two at once: the old pod is stopped before the new one starts. Should
+  # two ever run, a lock in Postgres lets only one of them work.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "gateway.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: provisioner
+  template:
+    metadata:
+      labels:
+        {{- include "gateway.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: provisioner
+      annotations:
+        checksum/store-values: {{ .Values.provisioner.storeValues | toJson | sha256sum }}
+    spec:
+      serviceAccountName: {{ $name }}
+      # The one pod in this chart that is given a token for the Kubernetes API.
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "gateway.podSecurityContext" . | nindent 8 }}
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: provisioner
+          image: {{ include "gateway.image" .Values.provisioner.image | quote }}
+          imagePullPolicy: {{ .Values.provisioner.image.pullPolicy }}
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gateway.secretName" . }}
+                  key: postgres-password
+            - name: DATABASE_URL
+              value: "postgresql://gateway:$(POSTGRES_PASSWORD)@{{ $fullname }}-postgres:5432/gateway"
+            # To store each new store's MCP token encrypted, as the API would.
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gateway.secretName" . }}
+                  key: encryption-key
+            - name: STORE_VALUES_FILES
+              value: "/charts/store/{{ .Values.provisioner.storeValuesFile }},/etc/provisioner/values.yaml"
+            - name: STORE_HOST_TEMPLATE
+              value: {{ .Values.provisioner.hostTemplate | quote }}
+            - name: STORE_URL_SCHEME
+              value: {{ ternary "https" "http" .Values.ingress.tls.enabled | quote }}
+            - name: CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | quote }}
+            - name: STORE_INSTALLER_ROLE
+              value: {{ $installer }}
+            - name: SERVICE_ACCOUNT
+              value: {{ $name }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PROVISION_TIMEOUT_SECONDS
+              value: {{ .Values.provisioner.timeoutSeconds | quote }}
+            - name: MAX_CONCURRENT_STORES
+              value: {{ .Values.provisioner.maxConcurrent | quote }}
+            - name: HEARTBEAT_FILE
+              value: /tmp/alive
+            - name: LOG_LEVEL
+              value: {{ .Values.api.logLevel | quote }}
+          # There is no port to probe. The loop touches a file on every round,
+          # and both checks ask whether it did so within the last minute.
+          startupProbe:
+            exec:
+              command: [test, -f, /tmp/alive]
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe: &heartbeat
+            exec:
+              command: [sh, -c, 'test $(( $(date +%s) - $(stat -c %Y /tmp/alive) )) -lt 60']
+            periodSeconds: 20
+            timeoutSeconds: 3
+          livenessProbe: *heartbeat
+          resources:
+            {{- toYaml .Values.provisioner.resources | nindent 12 }}
+          securityContext:
+            {{- include "gateway.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: store-values
+              mountPath: /etc/provisioner
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: store-values
+          configMap:
+            name: {{ $name }}
+        - name: tmp
+          emptyDir: {}
+{{- end }}
