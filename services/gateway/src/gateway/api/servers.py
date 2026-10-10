@@ -224,3 +224,21 @@ async def audit_log(
         }
         for entry in entries
     ]
+
+
+@router.get("/stats")
+async def stats(request: Request, hours: int = 24, user: User = Depends(current_user)) -> list[dict]:
+    """Calls, failures and latency per server. Admins see the team's; a member sees their own."""
+    rows = await repo.server_stats(
+        parts(request).pool, hours=max(1, min(hours, 24 * 30)), user_id=None if user.role == "admin" else user.id
+    )
+    return [
+        {
+            "server": row.server_slug,
+            "calls": row.calls,
+            "failures": row.failures,
+            "median_ms": round(row.median_ms),
+            "p95_ms": round(row.p95_ms),
+        }
+        for row in rows
+    ]

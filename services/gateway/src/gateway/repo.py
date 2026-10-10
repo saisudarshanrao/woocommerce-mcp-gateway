@@ -376,3 +376,46 @@ async def list_audit(
         user_id, server_slug, outcome, before_id, limit,
     )
     return [_to(AuditEntry, row) for row in rows]
+
+
+@dataclass(frozen=True)
+class ServerStats:
+    server_slug: str
+    calls: int
+    failures: int
+    median_ms: float
+    p95_ms: float
+
+
+async def server_stats(pool: asyncpg.Pool, *, hours: int, user_id: UUID | None = None) -> list[ServerStats]:
+    """Calls, failures and latency per server over the last `hours`, worked out from the audit log."""
+    rows = await pool.fetch(
+        "SELECT server_slug, count(*) AS calls, "
+        "count(*) FILTER (WHERE outcome <> 'ok') AS failures, "
+        "percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms) AS median_ms, "
+        "percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms "
+        "FROM audit_log "
+        "WHERE at > now() - make_interval(hours => $1) AND server_slug IS NOT NULL "
+        "AND ($2::uuid IS NULL OR user_id = $2) "
+        "GROUP BY server_slug ORDER BY calls DESC",
+        hours, user_id,
+    )
+    return [_to(ServerStats, row) for row in rows]
+
+
+# --- rate limits ---------------------------------------------------------------
+
+
+async def count_call(pool: asyncpg.Pool, subject: str) -> int:
+    """Counts one more call for the subject in the current minute and returns the new total.
+
+    One statement, so two replicas counting at the same moment cannot both read
+    the old total. It also drops the subject's row for any earlier minute.
+    """
+    return await pool.fetchval(
+        "WITH old AS (DELETE FROM rate_counters WHERE subject = $1 AND minute < date_trunc('minute', now())) "
+        "INSERT INTO rate_counters (subject, minute, calls) VALUES ($1, date_trunc('minute', now()), 1) "
+        "ON CONFLICT (subject, minute) DO UPDATE SET calls = rate_counters.calls + 1 "
+        "RETURNING calls",
+        subject,
+    )

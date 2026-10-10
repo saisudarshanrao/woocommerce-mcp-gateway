@@ -82,6 +82,10 @@ api:
   logLevel: INFO
   # How often each upstream server is checked.
   probeIntervalSeconds: 10
+  # The most tool calls one API key may make in a minute (for the chat: one
+  # person). The count is kept in Postgres, so it holds across replicas. 0 is
+  # no limit.
+  rateLimitPerMinute: 120
   resources:
     requests:
       cpu: 50m
@@ -121,6 +125,17 @@ postgres:
   persistence:
     size: 5Gi
     storageClass: ""
+
+# The API serves Prometheus metrics at /metrics: tool calls by server and
+# outcome, call latency, and the health of each upstream. The Ingress does not
+# route that path, so it is reachable only from inside the cluster, and only by
+# the pods named here. With no Prometheus in the cluster, leave it off.
+metrics:
+  scrapeFrom:
+    enabled: false
+    namespace: monitoring
+    podLabels:
+      app.kubernetes.io/name: prometheus
 
 clusterDomain: cluster.local
 

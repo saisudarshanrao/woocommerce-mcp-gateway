@@ -21,7 +21,7 @@ from gateway.core import Gateway, Principal
 from gateway.upstreams import UpstreamManager
 
 POSTGRES_IMAGE = "postgres:18.6-alpine"
-TABLES = "audit_log, seeded_servers, upstream_servers, api_keys, invites, sessions, users"
+TABLES = "rate_counters, audit_log, seeded_servers, upstream_servers, api_keys, invites, sessions, users"
 
 
 @pytest.fixture

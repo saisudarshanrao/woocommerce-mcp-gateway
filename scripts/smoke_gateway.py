@@ -265,6 +265,24 @@ def run(args):
         for server, tool, outcome in sorted(expected, key=str):
             entry = next(e for e in entries if (e["server"], e["tool"], e["outcome"]) == (server, tool, outcome))
             ok(f"  {outcome:<11} {server or '-':<8} {tool:<20} {entry['duration_ms']:>5} ms  {entry['error'] or ''}"[:150])
+        print("\n== figures: per server in the dashboard, and for Prometheus inside the cluster")
+        stats = {row["server"]: row for row in admin.call("GET", "/api/stats")}
+        if not {"woo", "tasks", "sandbox"} <= set(stats):
+            raise Failure(f"statistics are missing a server: {sorted(stats)}")
+        for slug in ("woo", "tasks", "sandbox"):
+            row = stats[slug]
+            ok(f"{slug:<8} {row['calls']:>3} calls, {row['failures']} failed, typically {row['median_ms']} ms")
+        scrape = "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/metrics', timeout=5).read().decode())"
+        metrics = kubectl(args, "-n", args.namespace, "exec", f"deploy/{args.release}-api", "--", "python", "-c", scrape)
+        counted = [line for line in metrics.splitlines() if line.startswith("gateway_tool_calls_total{")]
+        if not counted or "gateway_upstream_up{" not in metrics:
+            raise Failure("the API pod's /metrics has no tool-call or upstream figures")
+        ok(f"/metrics inside the cluster: {len(counted)} tool-call series, plus health per upstream")
+        with urllib.request.urlopen(f"{args.url}/metrics", timeout=10) as public:
+            if "gateway_tool_calls_total" in public.read().decode():
+                raise Failure("/metrics is reachable from outside the cluster")
+        ok("the same path from outside the cluster does not reach the API")
+
         if any(e["user_email"] != email for e in member.call("GET", "/api/audit")):
             raise Failure("a member can see other people's audit entries")
         ok("the member sees only their own entries")

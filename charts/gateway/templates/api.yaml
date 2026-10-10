@@ -41,6 +41,10 @@ spec:
         {{- include "gateway.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: api
       annotations:
+        # Read by a Prometheus that discovers its targets from pod annotations.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
         # The seed list is read once at startup, so a changed list restarts the pods.
         checksum/seed: {{ .Values.seedServers | toJson | sha256sum }}
     spec:
@@ -92,6 +96,8 @@ spec:
               value: {{ join "," .Values.upstreams.internalHosts | quote }}
             - name: UPSTREAM_ALLOW_PUBLIC
               value: {{ .Values.upstreams.allowPublic | quote }}
+            - name: RATE_LIMIT_PER_MINUTE
+              value: {{ .Values.api.rateLimitPerMinute | quote }}
             - name: PROBE_INTERVAL_SECONDS
               value: {{ .Values.api.probeIntervalSeconds | quote }}
             - name: LLM_BASE_URL

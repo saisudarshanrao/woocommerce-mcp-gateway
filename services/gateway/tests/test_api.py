@@ -443,9 +443,9 @@ async def test_health_endpoints_and_public_config(app):
     async with browser(app) as client:
         assert (await client.get("/healthz")).text == "ok"
         assert (await client.get("/readyz")).text == "ok"
-        assert (await client.get("/api/config")).json() == {
-            "public_url": BASE, "mcp_url": f"{BASE}/mcp", "chat_enabled": False, "chat_model": "",
-        }
+        config = (await client.get("/api/config")).json()
+        assert config["public_url"] == BASE and config["mcp_url"] == f"{BASE}/mcp"
+        assert config["chat_enabled"] is False and config["chat_model"] == ""
 
 
 async def test_seed_servers_are_registered_once_and_stay_removed_if_removed(pool, tmp_path):
@@ -495,3 +495,18 @@ async def test_a_server_url_pointing_inside_the_cluster_or_at_metadata_is_refuse
     edited = await admin.patch(f"/api/servers/{shop['id']}", json={"url": "http://[::1]/mcp"})
     assert edited.status_code == 422
     assert "loopback" in edited.json()["detail"]
+
+
+async def test_metrics_are_served_for_prometheus_and_statistics_for_the_dashboard(app, admin):
+    key = (await admin.post("/api/keys", json={"name": "metrics"})).json()["key"]
+    async with mcp_client(app, key) as client:
+        await client.call_tool("shop__list_orders", {})
+
+    async with browser(app) as anonymous:
+        scraped = await anonymous.get("/metrics")
+    assert scraped.status_code == 200
+    assert 'gateway_tool_calls_total{outcome="ok",server="shop",source="mcp"} 1.0' in scraped.text
+    assert 'gateway_upstream_up{server="warehouse"} 1.0' in scraped.text
+
+    stats = (await admin.get("/api/stats")).json()
+    assert stats == [{"server": "shop", "calls": 1, "failures": 0, "median_ms": stats[0]["median_ms"], "p95_ms": stats[0]["p95_ms"]}]

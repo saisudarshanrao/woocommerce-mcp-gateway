@@ -10,6 +10,7 @@ const OUTCOME_TONE: Record<AuditEntry["outcome"], "green" | "red" | "amber" | "n
   timeout: "amber",
   unreachable: "amber",
   denied: "neutral",
+  limited: "amber",
 };
 
 export function AuditPage({ user }: { user: User }) {
@@ -26,6 +27,7 @@ export function AuditPage({ user }: { user: User }) {
     queryFn: () => api.audit({ user_id: userId, server, outcome, limit: 200 }),
     refetchInterval: 4000,
   });
+  const stats = useQuery({ queryKey: ["stats"], queryFn: () => api.stats(24), refetchInterval: 10000 });
 
   return (
     <>
@@ -37,6 +39,34 @@ export function AuditPage({ user }: { user: User }) {
             : "Every tool call you have made through the gateway, from an MCP client or from the chat."
         }
       />
+      {stats.data && stats.data.length > 0 && (
+        <Card className="mb-6 overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="border-b border-slate-200 text-xs uppercase tracking-wide text-slate-500">
+              <tr>
+                <th className="px-4 py-3 font-medium">Last 24 hours</th>
+                <th className="px-4 py-3 text-right font-medium">Calls</th>
+                <th className="px-4 py-3 text-right font-medium">Failed</th>
+                <th className="px-4 py-3 text-right font-medium">Typical</th>
+                <th className="px-4 py-3 text-right font-medium">Slowest 5%</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {stats.data.map((row) => (
+                <tr key={row.server}>
+                  <td className="px-4 py-2.5">{servers.data?.find((item) => item.slug === row.server)?.name ?? row.server}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums">{row.calls}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums">
+                    {row.failures} <span className="text-slate-500">({Math.round((100 * row.failures) / row.calls)}%)</span>
+                  </td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-slate-600">{row.median_ms} ms</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-slate-600">over {row.p95_ms} ms</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
       <div className="mb-4 flex flex-wrap gap-3">
         {isAdmin && (
           <select className={`${inputClass} w-auto`} value={userId} onChange={(e) => setUserId(e.target.value)} aria-label="Filter by user">

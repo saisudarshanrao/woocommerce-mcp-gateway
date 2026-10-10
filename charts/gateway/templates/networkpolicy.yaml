@@ -40,6 +40,34 @@ spec:
       ports:
         - protocol: TCP
           port: http
+{{- if .Values.metrics.scrapeFrom.enabled }}
+---
+# Prometheus may collect the API's metrics.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-metrics
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gateway.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.metrics.scrapeFrom.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.metrics.scrapeFrom.podLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: http
+{{- end }}
 ---
 # What the API may connect to. Its job is to call MCP servers at addresses an
 # admin types in, so this is the network's half of the guard in urlguard.py:

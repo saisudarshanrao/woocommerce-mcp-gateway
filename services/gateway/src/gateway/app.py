@@ -7,7 +7,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST
 
 from gateway import db, repo, seed
 from gateway.api import auth, chat, members, servers
@@ -15,6 +16,7 @@ from gateway.api.deps import Parts
 from gateway.chat.llm import ChatModel
 from gateway.config import Settings
 from gateway.core import Gateway
+from gateway.metrics import Metrics
 from gateway.mcp_endpoint import MCP_PATH, ApiKeyAuth, build_mcp_app
 from gateway.security import CredentialCipher
 from gateway.upstreams import HttpClientFactory, UpstreamManager, guarded_http_client
@@ -40,7 +42,8 @@ def create_app(
         probe_timeout_seconds=settings.probe_timeout_seconds,
         http_client_factory=http_client_factory or guarded_http_client(url_guard),
     )
-    gateway = Gateway(pool, upstreams)
+    metrics = Metrics()
+    gateway = Gateway(pool, upstreams, calls_per_minute=settings.rate_limit_per_minute, metrics=metrics)
     mcp_server, mcp_app = build_mcp_app(gateway, settings)
     if chat_model is None and settings.llm_api_key and settings.llm_model and settings.llm_base_url:
         chat_model = ChatModel(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
@@ -100,6 +103,11 @@ def create_app(
             return PlainTextResponse("database unavailable", status_code=503)
         return PlainTextResponse("ok")
 
+    @app.get("/metrics", include_in_schema=False)
+    async def prometheus() -> Response:
+        """Figures for Prometheus. The Ingress does not route here, so only the cluster can ask."""
+        return Response(metrics.render(upstreams.states()), media_type=CONTENT_TYPE_LATEST)
+
     @app.get("/api/config")
     async def config() -> dict:
         """What the dashboard needs to know about this deployment. Nothing secret."""
@@ -108,6 +116,7 @@ def create_app(
             "mcp_url": f"{settings.public_url}{MCP_PATH}",
             "chat_enabled": app_parts.chat_model is not None,
             "chat_model": app_parts.chat_model.model if app_parts.chat_model else "",
+            "rate_limit_per_minute": settings.rate_limit_per_minute,
         }
 
     app.include_router(auth.router)

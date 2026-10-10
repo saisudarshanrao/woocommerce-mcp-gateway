@@ -11,6 +11,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +19,7 @@ import asyncpg
 from mcp import types
 
 from gateway import naming, repo
+from gateway.metrics import Metrics
 from gateway.repo import Server
 from gateway.upstreams import ExposedTool, UpstreamError, UpstreamManager, UpstreamState
 
@@ -49,9 +51,19 @@ def may_use(principal: Principal, server: Server, tool: ExposedTool) -> bool:
 
 
 class Gateway:
-    def __init__(self, pool: asyncpg.Pool, upstreams: UpstreamManager):
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        upstreams: UpstreamManager,
+        *,
+        calls_per_minute: int = 0,
+        metrics: Metrics | None = None,
+    ):
         self._pool = pool
         self._upstreams = upstreams
+        # The most tool calls one API key, or one person in the chat, may make in a minute. 0 is no limit.
+        self._calls_per_minute = calls_per_minute
+        self._metrics = metrics or Metrics()
 
     async def list_tools(self, principal: Principal) -> list[types.Tool]:
         """Every tool this user may call right now, across all servers."""
@@ -86,8 +98,23 @@ class Gateway:
         started = time.perf_counter()
         slug: str | None = None
         tool_name: str | None = None
+        # The server as the metrics label it: only ever a registered server, so
+        # that made-up names in requests cannot create endless label values.
+        known_server = "-"
         outcome, error = "error", None
         try:
+            if self._calls_per_minute:
+                # An API key is limited by itself; the chat is limited per person.
+                subject = f"key:{principal.api_key_id}" if principal.api_key_id else f"user:{principal.user_id}"
+                if await repo.count_call(self._pool, subject) > self._calls_per_minute:
+                    wait = 60 - datetime.now(UTC).second
+                    outcome = "limited"
+                    error = (
+                        f"Rate limit reached: at most {self._calls_per_minute} tool calls a minute. "
+                        f"Try again in {wait} seconds."
+                    )
+                    return error_result(error)
+
             parts = naming.split(name)
             if parts is None:
                 error = f"There is no tool called '{name}'. Tool names look like <server>__<tool>."
@@ -98,6 +125,7 @@ class Gateway:
             if server is None:
                 error = f"There is no server '{slug}'."
                 return error_result(error)
+            known_server = server.slug
             if not server.enabled:
                 outcome, error = "denied", f"The server '{server.name}' is disabled."
                 return error_result(error)
@@ -131,6 +159,7 @@ class Gateway:
                 outcome = "ok"
             return result
         finally:
+            self._metrics.observe_call(known_server, outcome, principal.source, time.perf_counter() - started)
             await self._audit(principal, slug, tool_name or name, started, outcome, error)
 
     async def _audit(

@@ -29,6 +29,8 @@ class Settings:
     # addresses the gateway will connect to. See urlguard.py.
     upstream_internal_hosts: tuple[str, ...] = ()
     upstream_allow_public: bool = True
+    # Tool calls one API key (or one person in the chat) may make per minute. 0 is no limit.
+    rate_limit_per_minute: int = 0
     probe_interval_seconds: float = 10.0
     probe_timeout_seconds: float = 5.0
     session_ttl_hours: int = 12
@@ -72,6 +74,7 @@ class Settings:
             extra_allowed_hosts=listed("EXTRA_ALLOWED_HOSTS"),
             upstream_internal_hosts=listed("UPSTREAM_INTERNAL_HOSTS"),
             upstream_allow_public=env.get("UPSTREAM_ALLOW_PUBLIC", "true").strip().lower() != "false",
+            rate_limit_per_minute=int(env.get("RATE_LIMIT_PER_MINUTE", "0")),
             probe_interval_seconds=float(env.get("PROBE_INTERVAL_SECONDS", "10")),
             probe_timeout_seconds=float(env.get("PROBE_TIMEOUT_SECONDS", "5")),
             session_ttl_hours=int(env.get("SESSION_TTL_HOURS", "12")),

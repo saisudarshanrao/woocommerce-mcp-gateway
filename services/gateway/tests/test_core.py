@@ -275,3 +275,70 @@ def test_failures_are_sorted_into_unreachable_slow_and_broken(error, statuses, k
 
     assert explain(error, statuses)[0] == kind
     assert text in explain(error, statuses)[1]
+
+
+async def test_a_key_over_its_rate_limit_is_refused_and_other_keys_are_not(pool, manager, two_servers, alice, bob):
+    from uuid import uuid4
+
+    from gateway.core import Gateway, Principal
+
+    limited = Gateway(pool, manager, calls_per_minute=3)
+    key = Principal(user_id=alice.user_id, email=alice.email, role="member", source="mcp", api_key_id=uuid4())
+    other_key = Principal(user_id=alice.user_id, email=alice.email, role="member", source="mcp", api_key_id=uuid4())
+
+    results = [await limited.call_tool(key, "shop__list_orders", {}) for _ in range(5)]
+    assert [result.is_error for result in results] == [False, False, False, True, True]
+    assert "at most 3 tool calls a minute" in results[-1].content[0].text
+
+    # The limit is per key: the same person's other key, and other people, are unaffected.
+    assert not (await limited.call_tool(other_key, "shop__list_orders", {})).is_error
+    assert not (await limited.call_tool(bob, "shop__list_orders", {})).is_error
+
+    refused = await repo.list_audit(pool, outcome="limited")
+    assert len(refused) == 2 and all(entry.user_email == alice.email for entry in refused)
+
+
+async def test_the_rate_limit_holds_when_calls_arrive_together(pool, manager, two_servers, alice):
+    import asyncio
+
+    from gateway.core import Gateway
+
+    limited = Gateway(pool, manager, calls_per_minute=4)
+    results = await asyncio.gather(*(limited.call_tool(alice, "shop__list_orders", {}) for _ in range(12)))
+    assert sum(not result.is_error for result in results) == 4
+
+
+async def test_calls_are_counted_for_prometheus_by_server_and_outcome(pool, manager, two_servers, alice):
+    from gateway.core import Gateway
+    from gateway.metrics import Metrics
+
+    metrics = Metrics()
+    gateway = Gateway(pool, manager, metrics=metrics)
+    await gateway.call_tool(alice, "shop__list_orders", {})
+    await gateway.call_tool(alice, "shop__broken", {})
+    await gateway.call_tool(alice, "made-up-server__anything", {})
+
+    text = metrics.render(manager.states()).decode()
+    assert 'gateway_tool_calls_total{outcome="ok",server="shop",source="mcp"} 1.0' in text
+    assert 'gateway_tool_calls_total{outcome="error",server="shop",source="mcp"} 1.0' in text
+    # A name that matches no server is counted without becoming a label of its own.
+    assert 'gateway_tool_calls_total{outcome="error",server="-",source="mcp"} 1.0' in text
+    assert "made-up-server" not in text
+    assert 'gateway_tool_call_duration_seconds_count{server="shop"} 2.0' in text
+    assert 'gateway_upstream_up{server="shop"} 1.0' in text
+    assert 'gateway_upstream_tools{server="warehouse"} 2.0' in text
+
+
+async def test_statistics_per_server_come_from_the_audit_log(gateway, pool, two_servers, alice, bob):
+    for _ in range(3):
+        await gateway.call_tool(alice, "shop__list_orders", {})
+    await gateway.call_tool(alice, "shop__broken", {})
+    await gateway.call_tool(bob, "warehouse__list_orders", {})
+
+    everyone = {row.server_slug: row for row in await repo.server_stats(pool, hours=24)}
+    assert (everyone["shop"].calls, everyone["shop"].failures) == (4, 1)
+    assert everyone["warehouse"].calls == 1
+    assert everyone["shop"].p95_ms >= everyone["shop"].median_ms >= 0
+
+    only_bob = await repo.server_stats(pool, hours=24, user_id=bob.user_id)
+    assert [row.server_slug for row in only_bob] == ["warehouse"]

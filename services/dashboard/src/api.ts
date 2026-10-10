@@ -88,8 +88,17 @@ export interface AuditEntry {
   server: string | null;
   tool: string | null;
   duration_ms: number;
-  outcome: "ok" | "error" | "timeout" | "unreachable" | "denied";
+  outcome: "ok" | "error" | "timeout" | "unreachable" | "denied" | "limited";
   error: string | null;
+}
+
+/** One server's traffic over a period, worked out from the audit log. */
+export interface ServerStats {
+  server: string;
+  calls: number;
+  failures: number;
+  median_ms: number;
+  p95_ms: number;
 }
 
 export interface Config {
@@ -97,6 +106,7 @@ export interface Config {
   mcp_url: string;
   chat_enabled: boolean;
   chat_model: string;
+  rate_limit_per_minute: number;
 }
 
 export class ApiError extends Error {
@@ -160,6 +170,7 @@ export const api = {
     for (const [key, value] of Object.entries(filters)) if (value) query.set(key, String(value));
     return request<AuditEntry[]>("GET", `/api/audit?${query}`);
   },
+  stats: (hours = 24) => request<ServerStats[]>("GET", `/api/stats?hours=${hours}`),
 };
 
 // --- chat --------------------------------------------------------------------
