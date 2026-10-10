@@ -141,7 +141,8 @@ documentation is served at `/api/docs`.
 | Team (admin) | `GET /members`, `PATCH /members/{id}`, `DELETE /members/{id}` |
 | API keys | `GET /keys`, `POST /keys`, `DELETE /keys/{id}` |
 | Servers | `GET /servers`; admin: `POST`, `PATCH`, `DELETE`, `POST /servers/{id}/refresh` |
-| Audit log | `GET /audit` (admins see everyone's, members their own) |
+| Audit log | `GET /audit` (admins see everyone's, members their own), `GET /stats` (per-server figures) |
+| Stores | `GET /stores`, `POST /stores`, `POST /stores/{id}/retry`, `DELETE /stores/{id}` (owner or admin) |
 | Chat | `POST /chat`, answered as a server-sent event stream |
 
 ## Configuration
@@ -158,6 +159,27 @@ Environment variables, set by the [chart](../../charts/gateway).
 | `EXTRA_ALLOWED_HOSTS` | Host names to answer to besides the public one |
 | `PROBE_INTERVAL_SECONDS`, `PROBE_TIMEOUT_SECONDS` | Health checks; defaults 10 and 5 |
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | The chat model. Without a key the chat is off. |
+| `CHAT_TOOL_SEARCH_ABOVE` | With more tools than this the chat uses `find_tools` and `call_tool`; default 40 |
+| `UPSTREAM_INTERNAL_HOSTS`, `UPSTREAM_ALLOW_PUBLIC` | Which addresses a server URL may point at; see below |
+| `RATE_LIMIT_PER_MINUTE` | Tool calls per API key per minute; 0 is no limit |
+| `STORES_ENABLED`, `MAX_STORES_PER_USER`, `STORE_URL_TEMPLATE` | Stores from the dashboard |
+
+## Beyond the core
+
+Each of these is a single module, written to be read on its own. The design
+reasoning is in [docs/PLAN.md](../../docs/PLAN.md), sections 4.8 to 4.11.
+
+| Module | What it does |
+|---|---|
+| [urlguard.py](src/gateway/urlguard.py) | Decides which addresses the gateway will connect to, and pins each connection to the address it checked (server-side request forgery) |
+| [metrics.py](src/gateway/metrics.py) | Prometheus counters and histograms, served at `/metrics` |
+| [toolsearch.py](src/gateway/toolsearch.py) | `find_tools` and `call_tool`: every tool behind two, at `/mcp/search` and in the chat |
+| [api/stores.py](src/gateway/api/stores.py) | Records that a store should exist or should go. Touches no Kubernetes API. |
+| [provisioner/provisioner.py](src/gateway/provisioner/provisioner.py) | The loop that makes the cluster match the stores table. Runs as its own Deployment: `python -m gateway.provisioner` |
+| [provisioner/kube.py](src/gateway/provisioner/kube.py), [helm.py](src/gateway/provisioner/helm.py) | The handful of Kubernetes API calls it makes, and the helm command |
+
+The rate limit is in `Gateway.call_tool` ([core.py](src/gateway/core.py)) and
+one SQL statement in [repo.py](src/gateway/repo.py).
 
 ## Development
 

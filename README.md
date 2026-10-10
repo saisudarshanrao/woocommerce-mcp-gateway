@@ -25,6 +25,15 @@ MCP client ─────────┤  Traefik Ingress      │ dashboard   
 Only the storefront and the gateway have an Ingress. The gateway is the only
 thing allowed to call an MCP server, for external clients and for the chat alike.
 
+Beyond the core, the gateway also creates stores: a signed-in user asks for one
+in the dashboard, and a provisioner in the `gateway` namespace installs the same
+store chart into a new namespace `store-<slug>` and registers the store's MCP
+server automatically. The other extras that are in: per-server tool permissions,
+a guard against server-side request forgery, rate limits per key, Prometheus
+metrics, and a two-tool "find, then call" endpoint for when there are too many
+tools to list. [docs/PLAN.md](docs/PLAN.md) section 7 says what is and is not
+done.
+
 ## Documentation
 
 | | |
@@ -103,7 +112,7 @@ everything else works and the chat page says it is switched off.
 make smoke
 ```
 
-runs four end-to-end checks against the cluster:
+runs five end-to-end checks against the cluster:
 
 | Target | What it proves |
 |---|---|
@@ -111,6 +120,7 @@ runs four end-to-end checks against the cluster:
 | `make mcp-smoke` | The store's MCP tools create a product, list today's orders, update an order |
 | `make gateway-smoke` | The two-user flow: add servers, invite a member, use every server with one key, timeouts, a dead server, disable, revoke, audit log |
 | `make isolation-smoke` | Which connections between namespaces open and which are refused |
+| `make stores-smoke` | Two stores created at once from the dashboard's API, with the provisioner killed midway; their orders compared through the gateway; one store unable to reach the other; what the provisioner may do in the cluster; a store deleted, tools and volumes gone |
 
 ```bash
 make test
@@ -136,7 +146,8 @@ Production uses real DNS names and TLS, set in each chart's `values-prod.yaml`.
 | Namespace | Chart | Workloads |
 |---|---|---|
 | `store-main` | [charts/store](charts/store) | WordPress + WooCommerce, MariaDB, the store's MCP server, a cron job |
-| `gateway` | [charts/gateway](charts/gateway) | The gateway API, the dashboard, Postgres |
+| `gateway` | [charts/gateway](charts/gateway) | The gateway API, the dashboard, Postgres, the store provisioner |
+| `store-<slug>` | [charts/store](charts/store), installed by the provisioner | One per store created in the dashboard: the same workloads as `store-main`, plus a ResourceQuota and LimitRange |
 | `mcp-servers` | [charts/mcp-server](charts/mcp-server), installed twice | A task-list server and a sandbox server |
 
 Every workload has readiness and liveness probes and resource requests and
@@ -157,10 +168,10 @@ install, because k3s's local-path storage cannot resize.
 ```
 charts/
   store/        One WooCommerce store, with its database and MCP server
-  gateway/      The gateway API, the dashboard and Postgres
+  gateway/      The gateway API, the dashboard, Postgres and the store provisioner
   mcp-server/   Any MCP server image, reachable only by the gateway
 services/
-  gateway/      The gateway (Python, FastAPI)
+  gateway/      The gateway and the provisioner (Python, FastAPI)
   dashboard/    The dashboard (React, TypeScript)
   woo-mcp/      The WooCommerce MCP server (Python)
   demo-mcp/     Two small MCP servers: tasks and sandbox (Python)

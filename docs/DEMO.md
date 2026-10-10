@@ -115,4 +115,59 @@ key page shows the command.
 5. **Audit log.** As the admin open **Audit log**. *Every call above is there:
    user A's from the chat, user B's with their key's prefix, the refused call
    after the revocation, each with server, tool, time, duration and outcome.*
-   Sign in as user A: they see only their own.
+   Sign in as user A: they see only their own. *The table at the top gives
+   calls, failures and latency per server for the last 24 hours.*
+
+## 6. Bonus: stores from the dashboard
+
+1. As user A, open **Stores** and create two: *Corner Books* (`books`) and *Toy
+   Box* (`toys`). Create the second while the first is still going. *Both show
+   Provisioning, each with what it is waiting for, and turn Ready in about half
+   a minute, with a link to `http://books.localhost` and `http://toys.localhost`.*
+2. *On **Servers**, "Corner Books store" and "Toy Box store" are already there,
+   Connected, marked "store", with tools named `store-books__...` and
+   `store-toys__...`. Nobody registered them.*
+3. In the cluster, each store has its own namespace:
+
+   ```bash
+   kubectl get namespaces -l mcp-gateway/store
+   kubectl -n store-books get pods,pvc,secret,ingress,networkpolicy,resourcequota
+   ```
+
+4. Open both storefronts and buy something in each, as in section 1: one mug in
+   Corner Books, three in Toy Box.
+5. In the chat: *"Compare today's orders in the Corner Books store and the Toy
+   Box store."* *It calls `store-books__list_orders` and
+   `store-toys__list_orders` and reports both totals.*
+6. On **Stores**, delete Toy Box. *Its server and tools are gone from
+   **Servers** and from the chat at once. Within a few seconds:*
+
+   ```bash
+   kubectl get namespace store-toys        # not found
+   kubectl get pv | grep store-toys        # nothing: the volumes are deleted
+   ```
+
+   *Corner Books still answers.* Delete it too when you are done.
+
+`make stores-smoke` runs this section without the chat, and adds what is awkward
+to show by hand: killing the provisioner in the middle of two installs, one
+store's MCP server failing to connect to the other's database, the limit of
+three stores per person, and what the provisioner's own Kubernetes identity is
+refused.
+
+## 7. The other extras, briefly
+
+* **Request forgery.** As the admin, try to add a server with the URL
+  `http://169.254.169.254/latest/meta-data/` or
+  `https://kubernetes.default.svc.cluster.local/`. *Refused, with the reason.*
+* **Tool permissions.** Edit a server and set "members may use" to read-only.
+  *A member's client lists only its read-only tools; calling another is refused
+  and audited as denied.*
+* **Many tools.** Point an MCP client at `http://gateway.localhost/mcp/search`
+  with the same key. *It lists two tools, `find_tools` and `call_tool`, and
+  reaches all the others through them.*
+* **Metrics.**
+
+  ```bash
+  kubectl -n gateway exec deploy/gateway-api -- python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080/metrics').read().decode())" | grep '^gateway_'
+  ```

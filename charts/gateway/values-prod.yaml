@@ -39,7 +39,8 @@ postgres:
     size: 10Gi
 
 # Stores from the dashboard. Point a wildcard DNS record (*.stores.example.com)
-# at the server, and set the image tags for new stores under storeValues.
+# at the server. `make gateway-up` sets the registry and image tags that new
+# stores use, to the same ones the first store runs.
 provisioner:
   enabled: true
   image:
@@ -49,9 +50,3 @@ provisioner:
   storeValues:
     quota:
       enabled: true
-    wordpress:
-      image:
-        registry: ghcr.io/OWNER
-    wooMcp:
-      image:
-        registry: ghcr.io/OWNER
