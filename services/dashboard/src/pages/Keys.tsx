@@ -23,6 +23,12 @@ export function KeysPage() {
     mutationFn: api.revokeKey,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["keys"] }),
   });
+  // Clients that signed in with the browser instead of a key.
+  const grants = useQuery({ queryKey: ["grants"], queryFn: api.grants });
+  const signOut = useMutation({
+    mutationFn: api.revokeGrant,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["grants"] }),
+  });
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -53,6 +59,33 @@ export function KeysPage() {
       </Card>
 
       {created?.key && <NewKey apiKey={created.key} mcpUrl={mcpUrl} onDismiss={() => setCreated(null)} />}
+
+      {config.data?.oauth_enabled && (
+        <Card className="mb-6 p-5">
+          <h2 className="text-sm font-semibold text-slate-900">Or sign in from the client, without a key</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Give an MCP client only the address <code className="text-xs">{mcpUrl}</code>. It opens this dashboard in your browser, you click
+            Allow, and it is connected as you. In Claude Code: <code className="text-xs">claude mcp add --transport http gateway {mcpUrl}</code>
+          </p>
+          {grants.data && grants.data.length > 0 && (
+            <ul className="mt-3 divide-y divide-slate-100 border-t border-slate-100 text-sm">
+              {grants.data.map((grant) => (
+                <li key={grant.id} className="flex items-center justify-between gap-3 py-2">
+                  <span>
+                    <span className="font-medium">{grant.client_name}</span>{" "}
+                    <span className="text-slate-500">
+                      signed in {ago(grant.created_at)}, last used {ago(grant.last_used_at)}
+                    </span>
+                  </span>
+                  <Button size="sm" variant="danger" onClick={() => signOut.mutate(grant.id)} disabled={signOut.isPending}>
+                    Sign out
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+      )}
 
       <Card>
         <table className="w-full text-left text-sm">

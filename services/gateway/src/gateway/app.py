@@ -10,8 +10,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST
 
-from gateway import db, repo, seed
-from gateway.api import auth, chat, members, servers, stores
+from gateway import db, oauth, repo, seed
+from gateway.api import auth, chat, members, oauth as oauth_api, servers, stores
 from gateway.api.deps import Parts
 from gateway.chat.llm import ChatModel
 from gateway.config import Settings
@@ -47,6 +47,9 @@ def create_app(
     mcp_servers, mcp_app = build_mcp_app(gateway, settings)
     if chat_model is None and settings.llm_api_key and settings.llm_model and settings.llm_base_url:
         chat_model = ChatModel(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
+    oauth_store = oauth.OAuthStore(pool, settings.public_url)
+    # Browser sign-in for MCP clients needs HTTPS, or an address on this machine.
+    oauth_on = oauth.allowed_issuer(settings.public_url)
     app_parts = Parts(
         settings=settings,
         pool=pool,
@@ -54,6 +57,7 @@ def create_app(
         upstreams=upstreams,
         gateway=gateway,
         url_guard=url_guard,
+        oauth=oauth_store,
         chat_model=chat_model,
     )
 
@@ -62,6 +66,7 @@ def create_app(
         await pool.connect(retry_for_seconds=90)
         await db.migrate(pool)
         await repo.delete_expired_sessions(pool)
+        await oauth_store.delete_expired()
         await seed.bootstrap_admin(pool, settings)
         await seed.seed_servers(pool, cipher, settings)
         await upstreams.start()
@@ -118,6 +123,8 @@ def create_app(
             "mcp_url": f"{settings.public_url}{MCP_PATH}",
             # The same tools presented as two, for when there are too many to list.
             "mcp_search_url": f"{settings.public_url}{SEARCH_PATH}",
+            # Whether an MCP client can sign in with a browser instead of a key.
+            "oauth_enabled": oauth_on,
             "chat_tool_search_above": settings.chat_tool_search_above,
             "chat_enabled": app_parts.chat_model is not None,
             "chat_model": app_parts.chat_model.model if app_parts.chat_model else "",
@@ -132,6 +139,11 @@ def create_app(
     app.include_router(servers.router)
     app.include_router(chat.router)
     app.include_router(stores.router)
+    app.include_router(oauth_api.router)
+    if oauth_on:
+        app.router.routes.extend(oauth.oauth_routes(oauth_store, settings.public_url, MCP_PATH))
+    else:
+        logger.info("browser sign-in for MCP clients is off: it needs an https address")
 
     @app.exception_handler(Exception)
     async def unexpected(_: Request, error: Exception) -> JSONResponse:
@@ -140,5 +152,6 @@ def create_app(
 
     # Everything not matched above goes to the MCP app, which serves /mcp and
     # answers 404 for anything else. API-key authentication wraps only it.
-    app.mount("/", ApiKeyAuth(mcp_app, pool))
+    sign_in = oauth.resource_metadata_url(settings.public_url, MCP_PATH) if oauth_on else None
+    app.mount("/", ApiKeyAuth(mcp_app, pool, sign_in))
     return app

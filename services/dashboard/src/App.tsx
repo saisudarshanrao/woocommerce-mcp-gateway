@@ -8,6 +8,7 @@ import { Badge } from "./components/ui";
 import { AcceptInvitePage } from "./pages/AcceptInvite";
 import { AuditPage } from "./pages/Audit";
 import { ChatPage } from "./pages/Chat";
+import { ConsentPage } from "./pages/Consent";
 import { KeysPage } from "./pages/Keys";
 import { LoginPage } from "./pages/Login";
 import { ServersPage } from "./pages/Servers";
@@ -32,7 +33,8 @@ function SignedIn() {
   if (me.isPending) return <p className="p-8 text-sm text-slate-500">Loading…</p>;
   if (me.error) {
     if (me.error instanceof ApiError && me.error.status === 401) {
-      return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+      // The query string is kept: a sign-in request from an MCP client is in it.
+      return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
     }
     return <p className="p-8 text-sm text-rose-700">The gateway cannot be reached: {me.error.message}</p>;
   }
@@ -49,6 +51,7 @@ function SignedIn() {
             <Route path="/stores" element={<StoresPage user={user} />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/keys" element={<KeysPage />} />
+            <Route path="/consent" element={<ConsentPage user={user} />} />
             <Route path="/audit" element={<AuditPage user={user} />} />
             {user.role === "admin" && <Route path="/team" element={<TeamPage user={user} />} />}
             <Route path="*" element={<Navigate to="/servers" replace />} />

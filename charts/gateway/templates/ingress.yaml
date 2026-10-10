@@ -26,20 +26,19 @@ spec:
     - host: {{ .Values.host | quote }}
       http:
         paths:
-          - path: /api
+          # To the API: the dashboard's REST API, the MCP endpoint, and the
+          # OAuth endpoints an MCP client uses to sign in with a browser. Their
+          # paths are fixed by the OAuth and MCP specifications. Everything
+          # else, including the consent page, is the dashboard.
+          {{- range list "/api" "/mcp" "/.well-known/oauth-authorization-server" "/.well-known/oauth-protected-resource" "/authorize" "/token" "/register" "/revoke" }}
+          - path: {{ . }}
             pathType: Prefix
             backend:
               service:
                 name: {{ $fullname }}-api
                 port:
                   name: http
-          - path: /mcp
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ $fullname }}-api
-                port:
-                  name: http
+          {{- end }}
           {{- if .Values.dashboard.enabled }}
           - path: /
             pathType: Prefix

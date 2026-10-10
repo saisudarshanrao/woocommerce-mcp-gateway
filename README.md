@@ -30,8 +30,9 @@ in the dashboard, and a provisioner in the `gateway` namespace installs the same
 store chart into a new namespace `store-<slug>` and registers the store's MCP
 server automatically. The other extras that are in: per-server tool permissions,
 a guard against server-side request forgery, rate limits per key, Prometheus
-metrics, and a two-tool "find, then call" endpoint for when there are too many
-tools to list. [docs/PLAN.md](docs/PLAN.md) section 7 says what is and is not
+metrics, a two-tool "find, then call" endpoint for when there are too many
+tools to list, and signing in from an MCP client with a browser (OAuth) as an
+alternative to pasting an API key. [docs/PLAN.md](docs/PLAN.md) section 7 says what is and is not
 done.
 
 ## Documentation

@@ -20,7 +20,7 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from gateway import repo, security
+from gateway import oauth, repo, security
 from gateway.config import Settings
 from gateway.core import Gateway, Principal
 from gateway.toolsearch import META_TOOLS, ToolSearch
@@ -44,11 +44,20 @@ find_tools searches them, and call_tool runs one. Tools are named <server>__<too
 
 
 class ApiKeyAuth:
-    """Admits a request only with a live API key, and records who it belongs to."""
+    """Admits a request only with a live credential, and records who it belongs to.
 
-    def __init__(self, app: ASGIApp, pool: asyncpg.Pool):
+    The credential is a bearer token of one of two kinds: an API key made in
+    the dashboard, or an access token a client obtained by signing in with a
+    browser (oauth.py). Either way it is looked up by its hash on every
+    request, which is what makes revoking one take effect on the very next call.
+    """
+
+    def __init__(self, app: ASGIApp, pool: asyncpg.Pool, resource_metadata_url: str | None = None):
         self.app = app
         self._pool = pool
+        # Sent with every 401 so that a client with no credential can find out
+        # how to sign in. None when browser sign-in is not available.
+        self._challenge = "Bearer" + (f' resource_metadata="{resource_metadata_url}"' if resource_metadata_url else "")
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -57,33 +66,21 @@ class ApiKeyAuth:
 
         headers = Headers(scope=scope)
         scheme, _, presented = headers.get("authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not presented.strip():
-            await self._reject(scope, receive, send, "Send your gateway API key as a bearer token.")
+        presented = presented.strip()
+        if scheme.lower() != "bearer" or not presented:
+            await self._reject(scope, receive, send, "Send your gateway API key as a bearer token, or sign in.")
             return
 
-        # The key is looked up by its hash on every request. That lookup is what
-        # makes revoking a key take effect on the very next call.
-        key = await repo.find_api_key(self._pool, security.hash_token(presented.strip()))
-        if key is None:
-            await self._reject(scope, receive, send, "This API key is not recognised.")
+        if presented.startswith(oauth.ACCESS_TOKEN_PREFIX):
+            principal, refusal = await self._from_access_token(presented)
+        else:
+            principal, refusal = await self._from_api_key(presented)
+        if principal is None:
+            await self._reject(scope, receive, send, refusal)
             return
-
-        principal = Principal(
-            user_id=key.user_id,
-            email=key.user_email,
-            role=key.user_role,
-            source="mcp",
-            api_key_id=key.id,
-            api_key_prefix=key.prefix,
-        )
-        refusal = None
-        if key.revoked_at is not None:
-            refusal = "This API key has been revoked."
-        elif not key.user_active:
-            refusal = "This account has been deactivated."
         if refusal:
-            # The key is known, so the attempt can be attributed even though it
-            # is refused. Newer clients name the tool in a header.
+            # The credential is known, so the attempt can be attributed even
+            # though it is refused. Newer clients name the tool in a header.
             await repo.add_audit(
                 self._pool,
                 user_id=principal.user_id,
@@ -100,14 +97,52 @@ class ApiKeyAuth:
             await self._reject(scope, receive, send, refusal)
             return
 
-        await repo.touch_api_key(self._pool, key.id)
         scope.setdefault("state", {})["principal"] = principal
         await self.app(scope, receive, send)
 
-    @staticmethod
-    async def _reject(scope: Scope, receive: Receive, send: Send, message: str) -> None:
+    async def _from_api_key(self, presented: str) -> tuple[Principal | None, str | None]:
+        """Who an API key belongs to, and why it is refused if it is."""
+        key = await repo.find_api_key(self._pool, security.hash_token(presented))
+        if key is None:
+            return None, "This API key is not recognised."
+        principal = Principal(
+            user_id=key.user_id,
+            email=key.user_email,
+            role=key.user_role,
+            source="mcp",
+            api_key_id=key.id,
+            api_key_prefix=key.prefix,
+        )
+        if key.revoked_at is not None:
+            return principal, "This API key has been revoked."
+        if not key.user_active:
+            return principal, "This account has been deactivated."
+        await repo.touch_api_key(self._pool, key.id)
+        return principal, None
+
+    async def _from_access_token(self, presented: str) -> tuple[Principal | None, str | None]:
+        """Who signed in to get this access token. An expired or revoked one is simply unknown:
+        the client then uses its refresh token, or sends the person to sign in again."""
+        grant = await oauth.find_grant_by_access_token(self._pool, presented)
+        if grant is None:
+            return None, "This access token has expired or been revoked."
+        principal = Principal(
+            user_id=grant.user_id,
+            email=grant.user_email,
+            role=grant.user_role,
+            source="mcp",
+            # In the audit log's "via" column this reads as where the call came from.
+            api_key_id=grant.id,
+            api_key_prefix=f"signed in: {grant.client_name}"[:60],
+        )
+        if not grant.user_active:
+            return principal, "This account has been deactivated."
+        await oauth.touch_grant(self._pool, grant.id)
+        return principal, None
+
+    async def _reject(self, scope: Scope, receive: Receive, send: Send, message: str) -> None:
         response = JSONResponse(
-            {"error": "unauthorized", "message": message}, status_code=401, headers={"WWW-Authenticate": "Bearer"}
+            {"error": "unauthorized", "message": message}, status_code=401, headers={"WWW-Authenticate": self._challenge}
         )
         await response(scope, receive, send)
 

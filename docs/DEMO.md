@@ -163,6 +163,12 @@ refused.
 * **Tool permissions.** Edit a server and set "members may use" to read-only.
   *A member's client lists only its read-only tools; calling another is refused
   and audited as denied.*
+* **Sign in with the browser.** Add the gateway to Claude Code with no key:
+  `claude mcp add --transport http gateway-oauth http://gateway.localhost/mcp`,
+  then run `/mcp` and choose it. *A browser opens on the dashboard's "Allow
+  access?" page; after Allow the client is connected as that user, and appears
+  under "sign in from the client" on the API keys page, where it can be signed
+  out.* (Verified with the MCP SDK's client; not yet with Claude Code itself.)
 * **Many tools.** Point an MCP client at `http://gateway.localhost/mcp/search`
   with the same key. *It lists two tools, `find_tools` and `call_tool`, and
   reaches all the others through them.*

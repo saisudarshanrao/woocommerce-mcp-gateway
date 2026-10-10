@@ -107,6 +107,7 @@ export interface Config {
   public_url: string;
   mcp_url: string;
   mcp_search_url: string;
+  oauth_enabled: boolean;
   chat_tool_search_above: number;
   chat_enabled: boolean;
   chat_model: string;
@@ -132,6 +133,16 @@ export interface Store {
   owner_email: string;
   created_at: string;
   can_manage: boolean;
+}
+
+/** An MCP client that signed in with the browser instead of an API key. */
+export interface Grant {
+  id: string;
+  client_name: string;
+  user_id: string;
+  user_email: string;
+  created_at: string;
+  last_used_at: string | null;
 }
 
 export class ApiError extends Error {
@@ -195,6 +206,12 @@ export const api = {
     for (const [key, value] of Object.entries(filters)) if (value) query.set(key, String(value));
     return request<AuditEntry[]>("GET", `/api/audit?${query}`);
   },
+  consentRequest: (id: string) => request<{ client_name: string; returns_to: string }>("GET", `/api/oauth/requests/${id}`),
+  answerConsent: (id: string, answer: "approve" | "deny") =>
+    request<{ redirect: string }>("POST", `/api/oauth/requests/${id}/${answer}`),
+  grants: () => request<Grant[]>("GET", "/api/oauth/grants"),
+  revokeGrant: (id: string) => request<void>("DELETE", `/api/oauth/grants/${id}`),
+
   stores: () => request<Store[]>("GET", "/api/stores"),
   createStore: (name: string, slug: string) => request<Store>("POST", "/api/stores", { name, slug }),
   retryStore: (id: string) => request<Store>("POST", `/api/stores/${id}/retry`),

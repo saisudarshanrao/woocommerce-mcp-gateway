@@ -142,6 +142,7 @@ documentation is served at `/api/docs`.
 | API keys | `GET /keys`, `POST /keys`, `DELETE /keys/{id}` |
 | Servers | `GET /servers`; admin: `POST`, `PATCH`, `DELETE`, `POST /servers/{id}/refresh` |
 | Audit log | `GET /audit` (admins see everyone's, members their own), `GET /stats` (per-server figures) |
+| Browser sign-in | `GET /oauth/requests/{id}`, `POST .../approve`, `POST .../deny`, `GET /oauth/grants`, `DELETE /oauth/grants/{id}` |
 | Stores | `GET /stores`, `POST /stores`, `POST /stores/{id}/retry`, `DELETE /stores/{id}` (owner or admin) |
 | Chat | `POST /chat`, answered as a server-sent event stream |
 
@@ -173,6 +174,7 @@ reasoning is in [docs/PLAN.md](../../docs/PLAN.md), sections 4.8 to 4.11.
 |---|---|
 | [urlguard.py](src/gateway/urlguard.py) | Decides which addresses the gateway will connect to, and pins each connection to the address it checked (server-side request forgery) |
 | [metrics.py](src/gateway/metrics.py) | Prometheus counters and histograms, served at `/metrics` |
+| [oauth.py](src/gateway/oauth.py), [api/oauth.py](src/gateway/api/oauth.py) | Signing in from an MCP client with a browser: storage for the SDK's OAuth endpoints, and the consent step that ties a token to a user |
 | [toolsearch.py](src/gateway/toolsearch.py) | `find_tools` and `call_tool`: every tool behind two, at `/mcp/search` and in the chat |
 | [api/stores.py](src/gateway/api/stores.py) | Records that a store should exist or should go. Touches no Kubernetes API. |
 | [provisioner/provisioner.py](src/gateway/provisioner/provisioner.py) | The loop that makes the cluster match the stores table. Runs as its own Deployment: `python -m gateway.provisioner` |

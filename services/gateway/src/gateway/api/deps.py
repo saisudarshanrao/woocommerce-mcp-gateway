@@ -12,6 +12,7 @@ from gateway import repo, security
 from gateway.chat.llm import ChatModel
 from gateway.config import Settings
 from gateway.core import Gateway
+from gateway.oauth import OAuthStore
 from gateway.repo import User
 from gateway.security import CredentialCipher
 from gateway.upstreams import UpstreamManager
@@ -30,6 +31,7 @@ class Parts:
     upstreams: UpstreamManager
     gateway: Gateway
     url_guard: UrlGuard
+    oauth: OAuthStore
     # None when no model API key is configured; the chat is then switched off.
     chat_model: ChatModel | None = None
     ready: bool = False

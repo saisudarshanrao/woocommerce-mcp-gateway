@@ -201,6 +201,7 @@ The gateway's side of all this is documented in
 |---|---|---|---|
 | User password | Postgres, argon2id hash | nobody | anyone |
 | Gateway API key | Postgres, SHA-256 hash and a short prefix. Shown once on creation. | The user and their MCP client | Upstream servers |
+| OAuth access and refresh tokens | Postgres, SHA-256 hashes | The MCP client that signed in | Upstream servers, the dashboard |
 | Dashboard session | Postgres, hashed. HttpOnly cookie in the browser. | The browser | Page JavaScript |
 | Upstream credential (bearer or header) | Postgres, encrypted with a key from a Secret | Gateway process | Browser and MCP clients. The API only reports whether one is set. |
 | WooCommerce API key pair | Secret in the store namespace. WooCommerce stores an HMAC of the key. | woo-mcp and WooCommerce | Gateway and users |
@@ -404,11 +405,46 @@ the name counts three times one found in the description. That is deliberately
 simple. It needs no second model, its results can be explained, and it works
 because the naming scheme already puts the server and the action in every name.
 
+### 4.12 Signing in with a browser (OAuth)
+
+An API key has to be created in the dashboard and pasted into the client. The
+MCP authorization specification describes the alternative, and the gateway
+implements it ([oauth.py](../services/gateway/src/gateway/oauth.py)): the client
+is given only the URL, opens a browser, and the person clicks Allow.
+
+1. The client calls `/mcp` with no credential. The 401 carries
+   `WWW-Authenticate: Bearer resource_metadata="…"`, pointing at a document that
+   names the authorization server, which is the gateway itself.
+2. The client reads the server's metadata and registers itself
+   (`POST /register`): a name and the local address the browser should return to.
+3. It opens the browser at `/authorize` with a *code challenge*: the hash of a
+   random secret it keeps to itself (PKCE).
+4. `/authorize` grants nothing. It puts the request aside and sends the browser
+   to the dashboard's consent page, which needs a dashboard session. That is
+   where a sign-in becomes tied to a user: whoever is signed in and clicks Allow.
+5. The browser is sent back to the client with a one-time code.
+6. The client exchanges the code, together with the secret behind the
+   challenge, for an access token (one hour) and a refresh token (30 days).
+   A code alone is useless to anyone who intercepts it.
+
+From then on the access token is used exactly like an API key, and the gateway
+treats it like one: looked up by hash on every request, mapped to the user, the
+same permissions, rate limit and audit log (the entry reads "signed in: <client
+name>"). Signing a client out in the dashboard deletes the row, and its next
+request gets 401. Refreshing replaces both tokens, so a refresh token works once.
+
+The endpoints and the protocol checks (redirect address, code challenge, client
+authentication) are the MCP SDK's. What is the gateway's own is storage, all of
+it hashed, and step 4. OAuth requires HTTPS; plain HTTP is accepted only for an
+address on the same machine, such as `gateway.localhost`. Tested with the SDK's
+own OAuth client in the unit tests, and step by step in `make gateway-smoke`. It
+has not yet been tried with Claude Code or Cursor themselves.
+
 ## 5. Data model (gateway)
 
-The schema is three short files in
+The schema is four short files in
 [services/gateway/migrations](../services/gateway/migrations): the initial
-tables, the rate-limit counter, and stores.
+tables, the rate-limit counter, stores, and browser sign-in.
 
 * `users`: email, name, role (`admin` or `member`), password hash, active
 * `invites`: token hash, email, role, expiry, accepted time
@@ -429,6 +465,9 @@ tables, the rate-limit counter, and stores.
   `deleting`), what is happening or why it failed, URL, when the current attempt
   started. `upstream_servers.store_id` ties a store's server to it and removes
   the server when the store row goes.
+* `oauth_clients`, `oauth_requests`, `oauth_codes`, `oauth_grants`: registered
+  MCP clients, sign-ins awaiting an answer, one-time codes, and who is signed in
+  where. Codes and tokens are stored as hashes.
 
 ## 6. Repository layout
 
@@ -476,7 +515,7 @@ Beyond the core, from the brief's list of extras:
 | Many tools | Done, see 4.11: `/mcp/search` and the chat's automatic switch. |
 | Upgrades and rollback | Documented in [DEPLOY.md](DEPLOY.md); a rolling update of the API was measured to drop no requests. |
 | VPS deployment | Charts validated with production values. Not run on a real server. |
-| OAuth on the gateway | Not started. Clients authenticate with API keys. |
+| OAuth on the gateway | Done alongside API keys, see 4.12. Verified with the MCP SDK's client and by hand-rolled steps through the Ingress; not yet tried with Claude Code or Cursor themselves. |
 | Hosted MCP servers (by image) | Not started. The provisioner is the natural place for it: it already installs a chart into a namespace it creates. |
 
 ## 8. Risks and things learned
@@ -586,3 +625,5 @@ Still open:
 10. Why the URL check runs twice and pins the address, and what the
     NetworkPolicy adds on top (4.8).
 11. Why the rate-limit counter lives in Postgres and not in memory.
+12. The six steps of browser sign-in (4.12): what the code challenge protects
+    against, and at which step the token becomes tied to a user.

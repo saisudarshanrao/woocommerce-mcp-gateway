@@ -21,13 +21,16 @@ afterwards unless --keep is given. Standard library only.
 
 import argparse
 import base64
+import hashlib
 import http.cookiejar
 import json
+import secrets
 import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from smoke_mcp import McpClient
@@ -43,6 +46,11 @@ class Dashboard:
         self.base_url = base_url
         self._opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
+    def landing(self, url):
+        """Opens a link as this browser would, following redirects, and returns where it ends up."""
+        with self._opener.open(url, timeout=40) as response:
+            return response.geturl()
+
     def call(self, method, path, body=None, expect=(200, 201, 204)):
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"} if data else {}
@@ -56,6 +64,74 @@ class Dashboard:
         if status not in expect:
             raise Failure(f"{method} {path}: HTTP {status}: {payload}")
         return payload
+
+
+def post_form(url, fields):
+    """POSTs a form, as OAuth's token endpoint expects, and returns (status, parsed JSON)."""
+    req = urllib.request.Request(url, data=urllib.parse.urlencode(fields).encode(), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read() or b"{}")
+
+
+def sign_in_with_browser(base_url, person, client_name):
+    """What an MCP client does when given only the gateway's URL, with `person` playing the browser.
+
+    Returns the tokens it ends up with. Every step uses only what the previous
+    one returned, starting from the 401.
+    """
+    req = urllib.request.Request(f"{base_url}/mcp", data=b"{}", method="POST", headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=20)
+        raise Failure("the MCP endpoint answered without a credential")
+    except urllib.error.HTTPError as error:
+        # Python forgets `error` when this block ends, so keep what is needed from it.
+        status, challenge = error.code, error.headers.get("WWW-Authenticate", "")
+    if status != 401 or 'resource_metadata="' not in challenge:
+        raise Failure(f"no pointer to sign-in in the 401: {challenge!r}")
+    with urllib.request.urlopen(challenge.split('resource_metadata="')[1].rstrip('"'), timeout=20) as response:
+        resource = json.loads(response.read())
+    issuer = resource["authorization_servers"][0]
+    with urllib.request.urlopen(f"{issuer}/.well-known/oauth-authorization-server", timeout=20) as response:
+        server = json.loads(response.read())
+
+    callback = "http://localhost:53682/callback"
+    registered = json.loads(urllib.request.urlopen(urllib.request.Request(
+        server["registration_endpoint"], method="POST", headers={"Content-Type": "application/json"},
+        data=json.dumps({"client_name": client_name, "redirect_uris": [callback],
+                         "token_endpoint_auth_method": "none"}).encode()), timeout=20).read())
+
+    # PKCE: the client keeps a random secret and shows only its hash to the browser step.
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = secrets.token_urlsafe(16)
+    query = urllib.parse.urlencode({
+        "response_type": "code", "client_id": registered["client_id"], "redirect_uri": callback, "state": state,
+        "code_challenge": challenge, "code_challenge_method": "S256", "resource": resource["resource"],
+    })
+    # The person's browser follows the link, lands on the consent page, and they click Allow.
+    consent = urllib.parse.urlsplit(person.landing(f"{server['authorization_endpoint']}?{query}"))
+    request_id = urllib.parse.parse_qs(consent.query)["request"][0]
+    shown = person.call("GET", f"/api/oauth/requests/{request_id}")
+    back = urllib.parse.parse_qs(urllib.parse.urlsplit(
+        person.call("POST", f"/api/oauth/requests/{request_id}/approve")["redirect"]).query)
+    if back["state"] != [state]:
+        raise Failure("the state did not come back unchanged")
+
+    exchange = {"grant_type": "authorization_code", "code": back["code"][0], "redirect_uri": callback,
+                "client_id": registered["client_id"]}
+    status, _ = post_form(server["token_endpoint"], exchange | {"code_verifier": secrets.token_urlsafe(48)})
+    if status == 200:
+        raise Failure("the token endpoint accepted a code without the secret behind its challenge")
+    status, tokens = post_form(server["token_endpoint"], exchange | {"code_verifier": verifier})
+    if status != 200:
+        raise Failure(f"the code was not exchanged for tokens: HTTP {status} {tokens}")
+    status, _ = post_form(server["token_endpoint"], exchange | {"code_verifier": verifier})
+    if status == 200:
+        raise Failure("the same code was accepted twice")
+    return shown, tokens
 
 
 def kubectl(args, *command):
@@ -182,6 +258,23 @@ def run(args):
         today = mcp.call_tool("woo__list_orders", {"period": "today"})
         ok(f"woo__list_orders(today): {today['total']} order(s) since {today['period']['start']}")
 
+        print("\n== a client signs in through the browser instead of using a key")
+        shown, tokens = sign_in_with_browser(args.url, member, "Smoke client")
+        ok(f"given only {mcp_url}, it found where to sign in, registered itself, and the member was asked: "
+           f"'{shown['client_name']}', returning to {shown['returns_to']}")
+        ok("a code without the client's secret was refused, the right one exchanged for tokens, and a second use refused")
+        signed_in = McpClient(mcp_url, tokens["access_token"])
+        if tool_names(signed_in) != names:
+            raise Failure("the signed-in client does not see the same tools as the key")
+        signed_in.call_tool("woo__list_products", {"per_page": 1})
+        ok(f"with its access token it sees the same {len(names)} tools and can call them")
+        (grant,) = member.call("GET", "/api/oauth/grants")
+        member.call("DELETE", f"/api/oauth/grants/{grant['id']}")
+        listing = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        if (status := raw_status(mcp_url, tokens["access_token"], listing)) != 401:
+            raise Failure(f"after the member signed it out, its token still got HTTP {status}")
+        ok("the member signs it out in the dashboard; its next request gets HTTP 401")
+
         print("\n== the same tools through two: find, then call")
         search = McpClient(f"{mcp_url}/search", key["key"])
         if tool_names(search) != ["find_tools", "call_tool"]:
@@ -266,13 +359,16 @@ def run(args):
         entries = [e for e in admin.call("GET", "/api/audit?limit=200") if e["user_email"] == email]
         seen = {(e["server"], e["tool"], e["outcome"]) for e in entries}
         expected = {
-            ("woo", "list_orders", "ok"), ("tasks", "add_task", "ok"), ("sandbox", "slow", "timeout"),
+            ("woo", "list_orders", "ok"), ("woo", "list_products", "ok"), ("tasks", "add_task", "ok"),
+            ("sandbox", "slow", "timeout"),
             ("tasks", "list_tasks", "unreachable"), ("sandbox", "echo", "denied"),
             (None, "woo__list_products", "denied"),
         }
         if not expected <= seen:
             raise Failure(f"missing from the audit log: {sorted(expected - seen, key=str)}")
         ok(f"{len(entries)} entries for {email}, each with server, tool, time, duration and outcome")
+        if not any((e["api_key_prefix"] or "").startswith("signed in: Smoke client") for e in entries):
+            raise Failure("the call made after signing in with the browser is not marked as such")
         for server, tool, outcome in sorted(expected, key=str):
             entry = next(e for e in entries if (e["server"], e["tool"], e["outcome"]) == (server, tool, outcome))
             ok(f"  {outcome:<11} {server or '-':<8} {tool:<20} {entry['duration_ms']:>5} ms  {entry['error'] or ''}"[:150])

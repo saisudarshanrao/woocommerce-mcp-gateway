@@ -115,7 +115,13 @@ export function AuditPage({ user }: { user: User }) {
                 <td className="whitespace-nowrap px-4 py-2.5 text-slate-600">{clock(entry.at)}</td>
                 <td className="px-4 py-2.5">{entry.user_email}</td>
                 <td className="whitespace-nowrap px-4 py-2.5 text-slate-600">
-                  {entry.source === "chat" ? "chat" : <code className="text-xs">{entry.api_key_prefix}…</code>}
+                  {entry.source === "chat" ? (
+                    "chat"
+                  ) : entry.api_key_prefix?.startsWith("signed in") ? (
+                    entry.api_key_prefix
+                  ) : (
+                    <code className="text-xs">{entry.api_key_prefix}…</code>
+                  )}
                 </td>
                 <td className="px-4 py-2.5">{entry.server ?? "–"}</td>
                 <td className="px-4 py-2.5">
