@@ -7,6 +7,7 @@ the same rules, and leave the same audit trail.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from mcp import types
 
 from gateway import naming, repo
 from gateway.repo import Server
-from gateway.upstreams import ExposedTool, UpstreamError, UpstreamManager
+from gateway.upstreams import ExposedTool, UpstreamError, UpstreamManager, UpstreamState
 
 logger = logging.getLogger(__name__)
 
@@ -57,14 +58,28 @@ class Gateway:
         # The registry is read from the database on every request, so disabling
         # or removing a server takes effect at once. Tool details come from the
         # last probe, which is why this never waits on an upstream.
-        enabled = {server.id: server for server in await repo.list_servers(self._pool) if server.enabled}
+        enabled = [server for server in await repo.list_servers(self._pool) if server.enabled]
+        states = await asyncio.gather(*(self._current_state(server) for server in enabled))
         tools: list[types.Tool] = []
-        for state in self._upstreams.states():
-            server = enabled.get(state.server.id)
-            if server is None or state.status != "connected":
+        for server, state in zip(enabled, states):
+            if state is None or state.status != "connected":
                 continue
             tools.extend(tool.tool for tool in state.tools.values() if may_use(principal, server, tool))
         return sorted(tools, key=lambda tool: tool.name)
+
+    async def _current_state(self, server: Server) -> UpstreamState | None:
+        """What this process knows about a server in its present form.
+
+        Normally that is whatever the last background probe left. But a server
+        may have been added or edited through another gateway replica moments
+        ago, in which case this replica has never seen it, or has only seen its
+        old settings. Then it is probed now, once, so that every replica gives
+        the same answer straight away instead of after its next probe round.
+        """
+        state = self._upstreams.state(server.id)
+        if state is None or state.server.updated_at != server.updated_at:
+            state = await self._upstreams.refresh(server.id)
+        return state
 
     async def call_tool(self, principal: Principal, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         """Routes one call to its server. Always returns a result and always writes an audit row."""
@@ -87,7 +102,7 @@ class Gateway:
                 outcome, error = "denied", f"The server '{server.name}' is disabled."
                 return error_result(error)
 
-            state = self._upstreams.state(server.id)
+            state = await self._current_state(server)
             if state is None or state.status == "pending":
                 outcome, error = "unreachable", f"{server.name} has not been checked yet. Try again in a moment."
                 return error_result(error)

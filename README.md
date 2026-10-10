@@ -1,19 +1,46 @@
 # WooCommerce hosting with a team MCP gateway
 
-A WooCommerce store on Kubernetes, a self-written WooCommerce MCP server, and a
-gateway that puts every registered MCP server behind one endpoint with per-user
-API keys, an audit log, a dashboard and a chat agent.
+A WooCommerce store on Kubernetes, an MCP server that exposes its products and
+orders as tools, and a gateway that puts every registered MCP server behind one
+endpoint. An admin connects servers once in a dashboard; every team member then
+uses all of them from an MCP client or from the dashboard's chat, with their own
+API key and without ever seeing an upstream credential.
 
-* Spec: [docs/ASSIGNMENT.md](docs/ASSIGNMENT.md)
-* Design and build order: [docs/PLAN.md](docs/PLAN.md)
+Everything runs in the cluster and is installed with Helm. The same charts
+deploy to a local k3d cluster and to a k3s server, with only values changing.
 
-**Status:** the local cluster, the store (WordPress, WooCommerce, MariaDB) and the
-store's MCP server are built and verified. The gateway, dashboard and chat agent
-come next.
+```
+Browser ────────────┐                       ┌─ namespace: gateway ──────────────┐
+MCP client ─────────┤  Traefik Ingress      │ dashboard   React, served by nginx │
+(Claude Code, ...)  ├─ store.localhost   ┌──┤ api         REST, /mcp, chat agent │
+                    │  gateway.localhost │  │ postgres                           │
+                    │                    │  └──────┬──────────────────────────────┘
+                    │                    │         │ MCP, with each server's own credential
+                    │  ┌─ namespace: store-main ───▼──┐   ┌─ namespace: mcp-servers ─┐
+                    └──┤ wordpress   <──  woo-mcp     │   │ tasks-mcp   sandbox-mcp  │
+                       │ mariadb                      │   └──────────────────────────┘
+                       └──────────────────────────────┘
+```
 
-## Prerequisites
+Only the storefront and the gateway have an Ingress. The gateway is the only
+thing allowed to call an MCP server, for external clients and for the chat alike.
 
-Docker, [k3d](https://k3d.io), kubectl and Helm. On macOS with Homebrew:
+## Documentation
+
+| | |
+|---|---|
+| [docs/ASSIGNMENT.md](docs/ASSIGNMENT.md) | The brief this is built against |
+| [docs/PLAN.md](docs/PLAN.md) | Design decisions and the reasoning behind each |
+| [docs/DEMO.md](docs/DEMO.md) | The definition of done, step by step, with two users |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | Deploying to a VPS, upgrading and rolling back |
+| [services/gateway/README.md](services/gateway/README.md) | How a tool call flows; the naming scheme; timeouts; credentials |
+| [services/woo-mcp/README.md](services/woo-mcp/README.md) | How the MCP server talks to the store and why; MCP on the wire |
+
+## Run it locally
+
+### Prerequisites
+
+Docker, [k3d](https://k3d.io), kubectl, Helm and Python 3. On macOS with Homebrew:
 
 ```bash
 brew install colima docker docker-buildx kubernetes-cli helm k3d
@@ -32,103 +59,117 @@ Then start the Docker VM. This is also the command to run after a reboot:
 colima start --cpu 4 --memory 8 --disk 40
 ```
 
-Docker Desktop or any other Docker engine works in place of Colima.
+Docker Desktop or any other Docker engine works in place of Colima. Running the
+unit tests also needs [uv](https://docs.astral.sh/uv/) (`brew install uv`);
+building and deploying does not.
 
-Running the Python unit tests also needs [uv](https://docs.astral.sh/uv/)
-(`brew install uv`). Building and deploying does not: images are built inside
-Docker.
-
-## Local cluster
+### Start everything
 
 ```bash
-make cluster-up      # create the k3d cluster, or start it if it exists
-make cluster-smoke   # verify registry, storage, ingress and NetworkPolicy
-make cluster-status
-make cluster-stop    # stop, keep data
-make cluster-down    # delete everything
+make cluster-up
 ```
-
-The cluster is defined in [deploy/local/k3d.yaml](deploy/local/k3d.yaml): one k3s
-node pinned to the version a VPS gets from the k3s `stable` channel, with k3s's
-own Traefik, ServiceLB, local-path storage and NetworkPolicy controller left as
-they are. Images are pushed to and pulled from `localhost:5001`.
-
-## Store
 
 ```bash
-make store-up        # build the image, install the chart, wait until ready
-make store-smoke     # place a guest order and check the admin can see it
-make store-password  # print the WordPress admin password
-make store-status
-make store-down      # remove the store and delete its data
+make up
 ```
 
-`make store-up` builds [images/wordpress](images/wordpress), pushes it to the
-local registry and installs [charts/store](charts/store) into the `store-main`
-namespace. The first start installs WordPress and WooCommerce and takes about a
-minute. After that:
+`make up` builds five images, pushes them to the cluster's own registry and
+installs the three charts. The first run takes a few minutes. The whole system
+uses about 2 GB of memory.
 
-* Storefront: <http://store.localhost>, with three sample products and cash on
-  delivery enabled.
-* Admin: <http://store.localhost/wp-admin/>, user `admin`, password from
-  `make store-password`. Orders are under WooCommerce, Orders.
+| URL | What | Sign in |
+|---|---|---|
+| <http://store.localhost> | Storefront | |
+| <http://store.localhost/wp-admin/> | WooCommerce admin | `admin`, password from `make store-password` |
+| <http://gateway.localhost> | Dashboard | `admin@example.com`, password from `make gateway-password` |
+| `http://gateway.localhost/mcp` | The MCP endpoint | An API key, created in the dashboard |
 
-What the chart creates, all in one namespace:
+The chat needs a model API key. Any OpenAI-compatible provider works; the
+default is Gemini, whose free tier is enough:
 
-| Object | Purpose |
+```bash
+LLM_API_KEY=<your key> make llm-key
+```
+
+The provider and model are `llm.baseUrl` and `llm.model` in
+[charts/gateway/values.yaml](charts/gateway/values.yaml). Without a key
+everything else works and the chat page says it is switched off.
+
+[docs/DEMO.md](docs/DEMO.md) walks through using it.
+
+### Check that it works
+
+```bash
+make smoke
+```
+
+runs four end-to-end checks against the cluster:
+
+| Target | What it proves |
 |---|---|
-| StatefulSet `store-mariadb` + volume | The database |
-| Deployment `store-wordpress` + volume | Apache and PHP, with `wp-content` on the volume |
-| CronJob `store-wordpress-cron` | Triggers WordPress's scheduled tasks every five minutes |
-| Secret `store-secrets` | Every credential, generated on first install |
-| Ingress `store` | `store.localhost` to WordPress |
-| Deployment `store-woo-mcp` | The store's MCP server. No Ingress: only the gateway may call it. |
-| NetworkPolicies | Deny by default. Traefik, the cron job and the MCP server may reach WordPress; only WordPress may reach MariaDB; only the gateway may reach the MCP server. MariaDB may open no connection at all, and the MCP server only to WordPress and DNS. |
-
-`helm uninstall` keeps the volumes and the Secret, so reinstalling brings the
-same store back. `make store-down` deletes the namespace and with it the data.
-
-Two limits to know about. Order emails are not delivered, because the cluster
-has no mail server. Volume sizes cannot be changed after the first install.
-
-The design, and why each piece is the way it is, is in
-[docs/PLAN.md](docs/PLAN.md#47-how-a-store-pod-is-put-together).
-
-## The store's MCP server
-
-[services/woo-mcp](services/woo-mcp) exposes the store's products and orders as
-MCP tools: list products, get product, create product, list orders, get order,
-update order status. Its [README](services/woo-mcp/README.md) covers how it
-talks to the store and why, what protects it, and what the protocol looks like
-on the wire. It is deployed by `make store-up` along with the rest of the store.
+| `make store-smoke` | A guest can buy a product with cash on delivery, and the admin sees the order |
+| `make mcp-smoke` | The store's MCP tools create a product, list today's orders, update an order |
+| `make gateway-smoke` | The two-user flow: add servers, invite a member, use every server with one key, timeouts, a dead server, disable, revoke, audit log |
+| `make isolation-smoke` | Which connections between namespaces open and which are refused |
 
 ```bash
-make mcp-test         # unit tests: the tools against a fake store (needs uv)
-make mcp-smoke        # the real thing: create a product, take an order, update it
-make isolation-smoke  # try every connection around the store; check which are blocked
+make test
 ```
+
+runs the unit tests: the gateway's start a throwaway Postgres in Docker and run
+fake upstream servers in-process.
+
+`make help` lists every target. `make down` removes everything; `make
+cluster-down` deletes the cluster.
 
 ## Local domains
 
-| URL | What |
-|---|---|
-| `http://store.localhost` | Storefront and wp-admin |
-| `http://gateway.localhost` | Dashboard, `/api`, and the MCP endpoint at `/mcp` |
-
-`*.localhost` resolves to loopback on its own (RFC 6761) in browsers, curl and the
-macOS and Linux resolvers, so there is no `/etc/hosts` entry or local DNS server
-to set up. k3d publishes ports 80 and 443 on `127.0.0.1` only, so the stack is not
-reachable from the network.
+`*.localhost` resolves to loopback on its own (RFC 6761) in browsers, curl and
+the macOS and Linux resolvers, so there is no `/etc/hosts` entry or local DNS
+server to set up. k3d publishes ports 80 and 443 on `127.0.0.1` only, so the
+stack is not reachable from the network.
 
 Production uses real DNS names and TLS, set in each chart's `values-prod.yaml`.
+
+## What is in the cluster
+
+| Namespace | Chart | Workloads |
+|---|---|---|
+| `store-main` | [charts/store](charts/store) | WordPress + WooCommerce, MariaDB, the store's MCP server, a cron job |
+| `gateway` | [charts/gateway](charts/gateway) | The gateway API, the dashboard, Postgres |
+| `mcp-servers` | [charts/mcp-server](charts/mcp-server), installed twice | A task-list server and a sandbox server |
+
+Every workload has readiness and liveness probes and resource requests and
+limits, runs as a non-root user on a read-only root filesystem with all
+capabilities dropped, and sits behind a NetworkPolicy. Every credential is
+generated into a Kubernetes Secret on first install; none is in a values file
+or in git.
+
+`helm uninstall` keeps the volumes and Secrets, so reinstalling brings the same
+data back. Deleting the namespace removes them.
+
+Two limits to know about. WooCommerce's order emails are not delivered, because
+the cluster has no mail server. Volume sizes cannot be changed after the first
+install, because k3s's local-path storage cannot resize.
 
 ## Layout
 
 ```
-charts/store/       Helm chart for one store: values.yaml plus values-local.yaml and values-prod.yaml
-images/wordpress/   The store image: Dockerfile, wp-config.php, setup script
-services/woo-mcp/   The WooCommerce MCP server (Python)
-deploy/local/       k3d cluster definition
-scripts/            Cluster bring-up, image build, smoke tests
-docs/               The assignment and the plan
+charts/
+  store/        One WooCommerce store, with its database and MCP server
+  gateway/      The gateway API, the dashboard and Postgres
+  mcp-server/   Any MCP server image, reachable only by the gateway
+services/
+  gateway/      The gateway (Python, FastAPI)
+  dashboard/    The dashboard (React, TypeScript)
+  woo-mcp/      The WooCommerce MCP server (Python)
+  demo-mcp/     Two small MCP servers: tasks and sandbox (Python)
+images/
+  wordpress/    The store image: Dockerfile, wp-config.php, setup script
+deploy/local/   The k3d cluster definition
+scripts/        Cluster bring-up, image builds, end-to-end checks
+docs/           The assignment, the design, the demo script, deployment
 ```
+
+Each chart has `values.yaml` for the shared baseline, `values-local.yaml` and
+`values-prod.yaml`.

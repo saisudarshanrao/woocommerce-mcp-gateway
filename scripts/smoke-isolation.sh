@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Checks who can reach what around a store, by actually trying each connection.
+# Checks who can reach what in the cluster, by actually trying each connection.
 #
-#   blocked   a pod in an unrelated namespace -> WordPress, MariaDB, the MCP server
-#   blocked   a pod in the gateway's namespace without the gateway's labels -> the MCP server
-#   allowed   a pod with the gateway's namespace and labels -> the MCP server
-#   allowed   the MCP server -> its own WordPress
-#   blocked   the MCP server -> MariaDB, the Kubernetes API, the internet
+#   blocked   a pod in an unrelated namespace -> WordPress, MariaDB, any MCP
+#             server, the gateway's database, the gateway's API except via Ingress
+#   allowed   the gateway's API pod -> every MCP server
+#   blocked   another pod in the gateway's namespace -> an MCP server
+#   blocked   the gateway's API pod -> WordPress, MariaDB
+#   allowed   the store's MCP server -> its own WordPress
+#   blocked   the store's MCP server -> MariaDB, the Kubernetes API, the internet
 #   blocked   MariaDB -> anything
 #
 # Probe pods are created for the test and removed afterwards.
@@ -15,6 +17,7 @@ CTX="${KUBE_CONTEXT:-k3d-urumi}"
 STORE_NS="${STORE_NAMESPACE:-store-main}"
 RELEASE="${STORE_RELEASE:-store}"
 GATEWAY_NS="${GATEWAY_NAMESPACE:-gateway}"
+MCP_NS="${MCP_NAMESPACE:-mcp-servers}"
 OUTSIDE_NS="isolation-probe"
 
 k() { kubectl --context "$CTX" "$@"; }
@@ -30,6 +33,7 @@ WOO_MCP="${RELEASE}-woo-mcp.${STORE_NS}.svc.cluster.local"
 created_gateway_ns=""
 cleanup() {
   k delete namespace "$OUTSIDE_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  k -n "$GATEWAY_NS" delete pod bystander --ignore-not-found --wait=false >/dev/null 2>&1 || true
   if [ -n "$created_gateway_ns" ]; then
     k delete namespace "$GATEWAY_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   fi
@@ -72,34 +76,57 @@ probe_pod "$OUTSIDE_NS" outsider
 must_connect     "outsider -> Kubernetes API (control: the probe itself works)" "$OUTSIDE_NS" outsider kubernetes.default.svc.cluster.local 443
 must_not_connect "outsider -> WordPress"       "$OUTSIDE_NS" outsider "$WORDPRESS" 80
 must_not_connect "outsider -> MariaDB"         "$OUTSIDE_NS" outsider "$MARIADB" 3306
-must_not_connect "outsider -> the MCP server"  "$OUTSIDE_NS" outsider "$WOO_MCP" 80
+must_not_connect "outsider -> the store's MCP server"  "$OUTSIDE_NS" outsider "$WOO_MCP" 80
+if k get namespace "$MCP_NS" >/dev/null 2>&1; then
+  for server in tasks sandbox; do
+    must_not_connect "outsider -> the ${server} MCP server" "$OUTSIDE_NS" outsider "${server}-mcp.${MCP_NS}.svc.cluster.local" 80
+  done
+fi
+if k -n "$GATEWAY_NS" get deploy gateway-api >/dev/null 2>&1; then
+  must_not_connect "outsider -> the gateway's database" "$OUTSIDE_NS" outsider "gateway-postgres.${GATEWAY_NS}.svc.cluster.local" 5432
+  must_not_connect "outsider -> the gateway's API, bypassing the Ingress" "$OUTSIDE_NS" outsider "gateway-api.${GATEWAY_NS}.svc.cluster.local" 80
+fi
 
 step "pods in the gateway's namespace"
-if k get namespace "$GATEWAY_NS" >/dev/null 2>&1; then
-  # A probe carrying the gateway's labels would be picked up by the gateway's
-  # own Service, so this part only runs before the gateway is installed.
-  echo "  skip  namespace '$GATEWAY_NS' already exists; not adding look-alike pods to it"
-else
-  k create namespace "$GATEWAY_NS" >/dev/null
-  created_gateway_ns=1
-  probe_pod "$GATEWAY_NS" lookalike "app.kubernetes.io/name=gateway,app.kubernetes.io/component=api"
-  probe_pod "$GATEWAY_NS" bystander "app.kubernetes.io/name=something-else"
-  must_connect     "gateway-labelled pod -> the MCP server"            "$GATEWAY_NS" lookalike "$WOO_MCP" 80
-  must_connect     "other pod -> Kubernetes API (control)"             "$GATEWAY_NS" bystander kubernetes.default.svc.cluster.local 443
-  must_not_connect "same namespace, other labels -> the MCP server"    "$GATEWAY_NS" bystander "$WOO_MCP" 80
-  must_not_connect "gateway-labelled pod -> WordPress (not its business)" "$GATEWAY_NS" lookalike "$WORDPRESS" 80
-  must_not_connect "gateway-labelled pod -> MariaDB"                   "$GATEWAY_NS" lookalike "$MARIADB" 3306
-  status="$(k -n "$GATEWAY_NS" exec lookalike -- python -c '
+# Sends an MCP request with no credential and prints the HTTP status.
+unauthenticated_status='
 import sys, urllib.request, urllib.error
 try:
     urllib.request.urlopen(urllib.request.Request(sys.argv[1], data=b"{}", headers={"Content-Type": "application/json"}), timeout=5)
 except urllib.error.HTTPError as error:
-    print(error.code)' "http://${WOO_MCP}/mcp")"
-  [ "$status" = "401" ] || fail "reaching the MCP server without its token returned HTTP ${status:-nothing}, expected 401"
-  pass "reaching it is not enough: without the bearer token it answers HTTP 401"
+    print(error.code)'
+if k -n "$GATEWAY_NS" get deploy gateway-api >/dev/null 2>&1; then
+  # The gateway is installed: test from its real API pod, and from a pod beside it.
+  API="deploy/gateway-api"
+  must_connect     "the gateway's API pod -> the store's MCP server" "$GATEWAY_NS" "$API" "$WOO_MCP" 80
+  if k get namespace "$MCP_NS" >/dev/null 2>&1; then
+    must_connect   "the gateway's API pod -> the tasks MCP server"   "$GATEWAY_NS" "$API" "tasks-mcp.${MCP_NS}.svc.cluster.local" 80
+    must_connect   "the gateway's API pod -> the sandbox MCP server" "$GATEWAY_NS" "$API" "sandbox-mcp.${MCP_NS}.svc.cluster.local" 80
+  fi
+  must_not_connect "the gateway's API pod -> WordPress (not its business)" "$GATEWAY_NS" "$API" "$WORDPRESS" 80
+  must_not_connect "the gateway's API pod -> MariaDB"                     "$GATEWAY_NS" "$API" "$MARIADB" 3306
+  probe_pod "$GATEWAY_NS" bystander
+  must_connect     "another pod beside it -> Kubernetes API (control)"    "$GATEWAY_NS" bystander kubernetes.default.svc.cluster.local 443
+  must_not_connect "another pod beside it -> the store's MCP server"      "$GATEWAY_NS" bystander "$WOO_MCP" 80
+  must_not_connect "another pod beside it -> the gateway's database"      "$GATEWAY_NS" bystander "gateway-postgres" 5432
+  status="$(k -n "$GATEWAY_NS" exec "$API" -- python -c "$unauthenticated_status" "http://${WOO_MCP}/mcp")"
+else
+  # No gateway yet: stand in for it with a pod that carries its namespace and labels.
+  k create namespace "$GATEWAY_NS" >/dev/null
+  created_gateway_ns=1
+  probe_pod "$GATEWAY_NS" lookalike "app.kubernetes.io/name=gateway,app.kubernetes.io/component=api"
+  probe_pod "$GATEWAY_NS" bystander "app.kubernetes.io/name=something-else"
+  must_connect     "gateway-labelled pod -> the store's MCP server"       "$GATEWAY_NS" lookalike "$WOO_MCP" 80
+  must_connect     "other pod -> Kubernetes API (control)"                "$GATEWAY_NS" bystander kubernetes.default.svc.cluster.local 443
+  must_not_connect "same namespace, other labels -> the store's MCP server" "$GATEWAY_NS" bystander "$WOO_MCP" 80
+  must_not_connect "gateway-labelled pod -> WordPress (not its business)" "$GATEWAY_NS" lookalike "$WORDPRESS" 80
+  must_not_connect "gateway-labelled pod -> MariaDB"                      "$GATEWAY_NS" lookalike "$MARIADB" 3306
+  status="$(k -n "$GATEWAY_NS" exec lookalike -- python -c "$unauthenticated_status" "http://${WOO_MCP}/mcp")"
 fi
+[ "$status" = "401" ] || fail "reaching the MCP server without its token returned HTTP ${status:-nothing}, expected 401"
+pass "reaching it is not enough: without the bearer token it answers HTTP 401"
 
-step "what the MCP server itself can reach"
+step "what the store's MCP server itself can reach"
 must_connect     "MCP server -> its WordPress"      "$STORE_NS" "deploy/${RELEASE}-woo-mcp" "${RELEASE}-wordpress" 80
 must_not_connect "MCP server -> MariaDB"            "$STORE_NS" "deploy/${RELEASE}-woo-mcp" "${RELEASE}-mariadb" 3306
 must_not_connect "MCP server -> Kubernetes API"     "$STORE_NS" "deploy/${RELEASE}-woo-mcp" 10.43.0.1 443

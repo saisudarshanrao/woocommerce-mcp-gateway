@@ -92,8 +92,14 @@ def _leaves(error: BaseException) -> list[BaseException]:
     return [error]
 
 
-def explain(error: BaseException, statuses: list[int]) -> tuple[bool, str]:
-    """Turns a failure into (is it a connectivity problem, a sentence an admin can act on)."""
+def explain(error: BaseException, statuses: list[int]) -> tuple[str, str]:
+    """Turns a failure into (what kind it is, a sentence an admin can act on).
+
+    The kind is one of:
+      "unreachable"  the server cannot be talked to at all; its status changes
+      "timeout"      it accepted the request and then took too long over it
+      "error"        it answered, but not with a usable result
+    """
     leaves = _leaves(error)
     status = statuses[-1] if statuses else None
 
@@ -101,26 +107,29 @@ def explain(error: BaseException, statuses: list[int]) -> tuple[bool, str]:
         if isinstance(leaf, httpx2.ConnectError):
             text = str(leaf).lower()
             if any(hint in text for hint in ("name or service", "nodename", "name resolution", "no address")):
-                return True, "its host name does not resolve"
-            return True, "the connection was refused (is the server running?)"
+                return "unreachable", "its host name does not resolve"
+            return "unreachable", "the connection was refused (is the server running?)"
+        if isinstance(leaf, httpx2.ConnectTimeout):
+            return "unreachable", "it did not accept a connection in time"
         if isinstance(leaf, httpx2.TimeoutException):
-            return True, "it did not answer in time"
+            # Connected, then slow. One slow answer does not mean the server is down.
+            return "timeout", "it did not answer in time"
         if isinstance(leaf, httpx2.RequestError):
-            return True, f"the connection failed ({type(leaf).__name__})"
+            return "unreachable", f"the connection failed ({type(leaf).__name__})"
 
     if status in (401, 403):
-        return True, f"it rejected the gateway's credential (HTTP {status})"
+        return "unreachable", f"it rejected the gateway's credential (HTTP {status})"
     if status == 404:
-        return True, "there is no MCP endpoint at that URL (HTTP 404)"
+        return "unreachable", "there is no MCP endpoint at that URL (HTTP 404)"
     if status is not None and status >= 500:
-        return True, f"it answered with a server error (HTTP {status})"
+        return "unreachable", f"it answered with a server error (HTTP {status})"
 
     for leaf in leaves:
         if isinstance(leaf, MCPError):
-            return False, f"it answered with an MCP error: {leaf}"
+            return "error", f"it answered with an MCP error: {leaf}"
         if isinstance(leaf, ValidationError):
-            return False, "its answer does not follow the MCP protocol"
-    return False, f"{type(leaves[0]).__name__}: {leaves[0]}"
+            return "error", "its answer does not follow the MCP protocol"
+    return "error", f"{type(leaves[0]).__name__}: {leaves[0]}"
 
 
 class UpstreamManager:
@@ -311,15 +320,20 @@ class UpstreamManager:
         # that must succeed. An older server gets a fresh handshake per call.
         mode = state.protocol_version if state.protocol_version in MODERN_PROTOCOL_VERSIONS else "legacy"
         statuses: list[int] = []
+        slow = UpstreamError("timeout", f"{server.name} did not answer within {timeout:g} seconds.")
         try:
+            # The deadline is enforced here. The HTTP client underneath is given a
+            # longer one, so that it is always this deadline that ends a slow call.
             async with asyncio.timeout(timeout):
-                async with self._connect(server, mode, state.discover, timeout, statuses) as client:
+                async with self._connect(server, mode, state.discover, timeout + 10, statuses) as client:
                     return await client.call_tool(tool, arguments)
         except TimeoutError as error:
-            raise UpstreamError("timeout", f"{server.name} did not answer within {timeout:g} seconds.") from error
+            raise slow from error
         except Exception as error:
-            connectivity, reason = explain(error, statuses)
-            if connectivity:
+            kind, reason = explain(error, statuses)
+            if kind == "timeout":
+                raise slow from error
+            if kind == "unreachable":
                 # Say so at once rather than waiting for the next probe.
                 self._mark_unreachable(state, reason)
                 raise UpstreamError("unreachable", f"{server.name} is unreachable: {reason}.") from error

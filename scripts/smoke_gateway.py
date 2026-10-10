@@ -201,9 +201,11 @@ def run(args):
         try:
             dead = wait_for("the gateway notices", lambda: (s := server_named(admin, "tasks")) and s["status"] == "unreachable" and s)
             ok(f"the dashboard shows it as unreachable: {dead['error']}")
-            names = tool_names(mcp)
-            if any(n.startswith("tasks__") for n in names) or not any(n.startswith("woo__") for n in names):
-                raise Failure(f"unexpected tool list while tasks is down: {names}")
+            # With several gateway replicas each one notices on its own next
+            # check, so allow one check interval for them all to agree.
+            names = wait_for("its tools leave the list", lambda: (n := tool_names(mcp)) and not any(t.startswith("tasks__") for t in n) and n, 30)
+            if not any(n.startswith("woo__") for n in names):
+                raise Failure(f"the store's tools are missing too: {names}")
             mcp.call_tool("woo__list_products", {"per_page": 1})
             mcp.call_tool("sandbox__echo", {"text": "still here"})
             ok("its tools are gone from the list; the store and the sandbox still answer")
@@ -212,6 +214,7 @@ def run(args):
         finally:
             kubectl(args, "-n", MCP_NAMESPACE, "scale", "deployment/tasks-mcp", "--replicas=1")
         wait_for("the tasks server is connected again", lambda: server_named(admin, "tasks")["status"] == "connected", 90)
+        wait_for("its tools are back in the list", lambda: any(t.startswith("tasks__") for t in tool_names(mcp)), 30)
         ok("pod restored; the gateway reconnected on its own")
 
         print("\n== the admin disables a server")

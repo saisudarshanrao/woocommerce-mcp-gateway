@@ -1,11 +1,21 @@
-# Local workflow. Every target names its kube context explicitly instead of
-# trusting whichever one is current, so local values can never land on prod.
+# Every target names its kube context explicitly instead of trusting whichever
+# one is current, so local values can never land on prod by accident.
+#
+# The defaults are for the local cluster. For a VPS, override them:
+#   make up ENV=prod KUBE_CONTEXT=<context> REGISTRY=ghcr.io/<you> PLATFORM=linux/amd64
 CLUSTER      := urumi
 KUBE_CONTEXT ?= k3d-$(CLUSTER)
+# Where images are pushed to and pulled from. Passed to every chart.
 REGISTRY     ?= localhost:5001
+# Build for another CPU architecture than this machine's. Empty means native.
+PLATFORM     ?=
+export PLATFORM
 
 # Which values file to layer on each chart: values-$(ENV).yaml.
 ENV ?= local
+# Public addresses, for the smoke tests. They must match the charts' hosts.
+STORE_URL   ?= http://store.localhost
+GATEWAY_URL ?= http://gateway.localhost
 
 KUBECTL := kubectl --context $(KUBE_CONTEXT)
 HELM    := helm --kube-context $(KUBE_CONTEXT)
@@ -35,7 +45,7 @@ DASHBOARD_TAG      = $(shell ./scripts/image-tag.sh services/dashboard)
         mcp-test mcp-smoke isolation-smoke \
         mcp-servers-up mcp-servers-down tasks-token \
         gateway-image gateway-up gateway-down gateway-status gateway-logs gateway-password gateway-test gateway-smoke \
-        llm-key up down
+        llm-key up down smoke test
 
 help: ## List the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -67,8 +77,8 @@ store-up: store-image ## Install or upgrade the store, then wait until it is rea
 	$(HELM) upgrade --install $(STORE_RELEASE) charts/store \
 		--namespace $(STORE_NAMESPACE) --create-namespace \
 		--values charts/store/values-$(ENV).yaml \
-		--set wordpress.image.tag=$(WORDPRESS_TAG) \
-		--set wooMcp.image.tag=$(WOO_MCP_TAG) \
+		--set wordpress.image.registry=$(REGISTRY) --set wordpress.image.tag=$(WORDPRESS_TAG) \
+		--set wooMcp.image.registry=$(REGISTRY) --set wooMcp.image.tag=$(WOO_MCP_TAG) \
 		--wait --timeout 10m
 
 store-down: ## Remove the store and delete all of its data
@@ -86,19 +96,19 @@ store-password: ## Print the WordPress admin password
 		-o jsonpath='{.data.wp-admin-password}' | base64 -d; echo
 
 store-smoke: ## Place a guest order through the storefront and check the admin sees it
-	@python3 scripts/smoke_store.py --context $(KUBE_CONTEXT) \
+	@python3 scripts/smoke_store.py --url $(STORE_URL) --context $(KUBE_CONTEXT) \
 		--namespace $(STORE_NAMESPACE) --release $(STORE_RELEASE)
 
 mcp-test: ## Run the WooCommerce MCP server's unit tests
 	cd services/woo-mcp && uv run pytest -q
 
 mcp-smoke: ## Create a product, take an order and update it through the MCP tools
-	@python3 scripts/smoke_mcp.py --context $(KUBE_CONTEXT) \
+	@python3 scripts/smoke_mcp.py --url $(STORE_URL) --context $(KUBE_CONTEXT) \
 		--namespace $(STORE_NAMESPACE) --release $(STORE_RELEASE)
 
-isolation-smoke: ## Try every connection around the store and check which are blocked
+isolation-smoke: ## Try every connection between the namespaces and check which are blocked
 	@KUBE_CONTEXT=$(KUBE_CONTEXT) STORE_NAMESPACE=$(STORE_NAMESPACE) STORE_RELEASE=$(STORE_RELEASE) \
-		./scripts/smoke-isolation.sh
+		GATEWAY_NAMESPACE=$(GATEWAY_NAMESPACE) MCP_NAMESPACE=$(MCP_NAMESPACE) ./scripts/smoke-isolation.sh
 
 mcp-servers-up: ## Deploy the two extra MCP servers (tasks and sandbox)
 	@./scripts/build-image.sh services/demo-mcp $(DEMO_MCP_IMAGE)
@@ -107,7 +117,7 @@ mcp-servers-up: ## Deploy the two extra MCP servers (tasks and sandbox)
 			--namespace $(MCP_NAMESPACE) --create-namespace \
 			--values charts/mcp-server/values-$$server.yaml \
 			--values charts/mcp-server/values-$(ENV).yaml \
-			--set image.tag=$(DEMO_MCP_TAG) \
+			--set image.registry=$(REGISTRY) --set image.tag=$(DEMO_MCP_TAG) \
 			--wait --timeout 5m | grep -E "^(STATUS|REVISION)" | tr '\n' ' '; echo "($$server)"; \
 	done
 
@@ -125,8 +135,8 @@ gateway-up: gateway-image ## Install or upgrade the gateway, then wait until it 
 	$(HELM) upgrade --install $(GATEWAY_RELEASE) charts/gateway \
 		--namespace $(GATEWAY_NAMESPACE) --create-namespace \
 		--values charts/gateway/values-$(ENV).yaml \
-		--set api.image.tag=$(GATEWAY_TAG) \
-		--set dashboard.image.tag=$(DASHBOARD_TAG) \
+		--set api.image.registry=$(REGISTRY) --set api.image.tag=$(GATEWAY_TAG) \
+		--set dashboard.image.registry=$(REGISTRY) --set dashboard.image.tag=$(DASHBOARD_TAG) \
 		--wait --timeout 10m
 
 gateway-down: ## Remove the gateway and delete all of its data
@@ -147,7 +157,7 @@ gateway-test: ## Run the gateway's unit tests (starts a throwaway Postgres in Do
 	cd services/gateway && uv run pytest -q
 
 gateway-smoke: ## Walk the two-user flow: add servers, invite a member, use tools, revoke, check the audit log
-	@python3 scripts/smoke_gateway.py --context $(KUBE_CONTEXT) \
+	@python3 scripts/smoke_gateway.py --url $(GATEWAY_URL) --context $(KUBE_CONTEXT) \
 		--namespace $(GATEWAY_NAMESPACE) --release $(GATEWAY_RELEASE)
 
 llm-key: ## Store the chat model's API key (from the LLM_API_KEY environment variable) and restart the API
@@ -161,3 +171,10 @@ llm-key: ## Store the chat model's API key (from the LLM_API_KEY environment var
 up: store-up mcp-servers-up gateway-up ## Deploy everything: the store, the extra MCP servers and the gateway
 
 down: gateway-down mcp-servers-down store-down ## Remove everything and delete all data
+
+test: ## Run every unit test suite
+	cd services/woo-mcp && uv run pytest -q
+	cd services/demo-mcp && uv run pytest -q
+	cd services/gateway && uv run pytest -q
+
+smoke: store-smoke mcp-smoke gateway-smoke isolation-smoke ## Run every end-to-end check against the cluster

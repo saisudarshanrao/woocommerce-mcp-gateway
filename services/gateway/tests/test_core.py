@@ -1,5 +1,6 @@
 """The gateway core against two fake upstream servers and a real database."""
 
+import httpx2
 import pytest
 from mcp import types
 
@@ -94,13 +95,16 @@ async def test_a_tool_that_fails_upstream_is_passed_back_as_a_failure(gateway, t
     assert "the shop is closed" in text_of(result)
 
 
-async def test_a_slow_tool_times_out_with_a_clear_message(gateway, pool, two_servers, alice):
+async def test_a_slow_tool_times_out_with_a_clear_message(gateway, manager, pool, two_servers, alice):
     result = await gateway.call_tool(alice, "warehouse__slow", {"seconds": 10})
 
     assert result.is_error
     assert text_of(result) == "Warehouse did not answer within 1 seconds."
     entry = (await repo.list_audit(pool))[0]
     assert entry.outcome == "timeout" and 900 <= entry.duration_ms < 3000
+    # One slow tool is not a dead server: its other tools must stay available.
+    assert manager.state(two_servers[1].id).status == "connected"
+    assert not (await gateway.call_tool(alice, "warehouse__list_orders", {})).is_error
 
 
 async def test_a_slow_call_does_not_hold_up_other_servers(gateway, two_servers, alice):
@@ -224,3 +228,50 @@ async def test_the_stored_credential_is_sent_upstream_as_configured(manager, ups
 
     assert upstreams.seen_headers["shop.test"] == {"Authorization": "Bearer shop-token"}
     assert upstreams.seen_headers["warehouse.test"] == {"X-API-Key": "warehouse-key"}
+
+
+async def test_a_server_registered_through_another_replica_is_usable_here_at_once(gateway, manager, pool, alice):
+    await manager.sync()  # this replica has looked, and the registry was empty
+    # Another replica now registers a server. Only the shared database knows.
+    await add_server(pool, "shop", "shop.test")
+
+    names = [tool.name for tool in await gateway.list_tools(alice)]
+    result = await gateway.call_tool(alice, "shop__list_orders", {})
+
+    assert "shop__list_orders" in names
+    assert not result.is_error
+
+
+async def test_a_server_edited_through_another_replica_is_seen_in_its_new_form(
+    gateway, manager, upstreams, pool, two_servers, alice
+):
+    shop = two_servers[0]
+    # Another replica points the server somewhere that does not answer.
+    await repo.update_server(pool, shop.id, {"url": "http://nowhere.test/mcp"})
+
+    names = [tool.name for tool in await gateway.list_tools(alice)]
+
+    assert not any(name.startswith("shop__") for name in names)
+    assert manager.state(shop.id).status == "unreachable"
+
+
+@pytest.mark.parametrize(
+    ("error", "statuses", "kind", "text"),
+    [
+        (httpx2.ConnectError("All connection attempts failed"), [], "unreachable", "the connection was refused"),
+        (httpx2.ConnectError("[Errno -2] Name or service not known"), [], "unreachable", "does not resolve"),
+        (httpx2.ConnectTimeout("timed out"), [], "unreachable", "did not accept a connection"),
+        # The server took the request and then went quiet: slow, not down.
+        (httpx2.ReadTimeout("timed out"), [], "timeout", "did not answer in time"),
+        (ExceptionGroup("group", [httpx2.ReadTimeout("timed out")]), [], "timeout", "did not answer in time"),
+        (RuntimeError("Server returned an error response"), [401], "unreachable", "rejected the gateway's credential"),
+        (RuntimeError("Not Found"), [404], "unreachable", "no MCP endpoint at that URL"),
+        (RuntimeError("boom"), [200, 503], "unreachable", "server error (HTTP 503)"),
+        (RuntimeError("something else"), [200], "error", "something else"),
+    ],
+)
+def test_failures_are_sorted_into_unreachable_slow_and_broken(error, statuses, kind, text):
+    from gateway.upstreams import explain
+
+    assert explain(error, statuses)[0] == kind
+    assert text in explain(error, statuses)[1]
