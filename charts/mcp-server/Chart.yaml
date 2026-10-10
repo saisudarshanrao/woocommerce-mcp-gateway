@@ -1,0 +1,6 @@
+apiVersion: v2
+name: mcp-server
+description: One MCP server from a container image, reachable only by the gateway
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

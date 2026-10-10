@@ -1,0 +1,66 @@
+# One MCP server, run from a container image. It gets a ClusterIP Service and
+# no Ingress, and a NetworkPolicy that lets only the gateway's pods reach it.
+#
+# The same chart is installed once per server; see values-tasks.yaml and
+# values-sandbox.yaml.
+
+nameOverride: ""
+fullnameOverride: ""
+imagePullSecrets: []
+
+image:
+  # For example localhost:5001 or ghcr.io/<owner>. Empty means Docker Hub.
+  registry: ""
+  repository: demo-mcp
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Arguments for the container. The demo image takes the server's name here.
+args: []
+# Extra environment variables, as a name: value map.
+env: {}
+
+# The port the server listens on, the path of its MCP endpoint (only used to
+# print the URL after install) and the path Kubernetes probes.
+port: 8080
+mcpPath: /mcp
+healthPath: /healthz
+
+# A static credential the caller must present. The chart generates it into a
+# Secret and gives it to the container as AUTH_TOKEN, with AUTH_HEADER naming
+# the header: "Authorization" means a bearer token, any other name means the
+# header's whole value.
+auth:
+  enabled: false
+  header: Authorization
+  # Use this Secret (key "token") instead of generating one.
+  existingSecret: ""
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 192Mi
+
+clusterDomain: cluster.local
+
+networkPolicy:
+  enabled: true
+  # Which pods are "the gateway". Must match the gateway chart's API pods.
+  gateway:
+    namespace: gateway
+    podLabels:
+      app.kubernetes.io/name: gateway
+      app.kubernetes.io/component: api
+  # Outbound connections. A server that only computes needs none.
+  egress:
+    # Cluster DNS, needed by any server that calls something by name.
+    dns: false
+    # Anywhere outside the cluster.
+    internet: false
+  dns:
+    namespace: kube-system
+    podLabels:
+      k8s-app: kube-dns

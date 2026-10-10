@@ -1,0 +1,4 @@
+# Local cluster (k3d). `make mcp-servers-up` also sets image.tag to the content
+# hash of services/demo-mcp.
+image:
+  registry: localhost:5001

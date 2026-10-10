@@ -1,0 +1,39 @@
+# Production-like VPS (k3s). Applied on top of values.yaml.
+#
+# Change the hostname, the admin email and the image registry before use. TLS
+# expects cert-manager with a ClusterIssuer of the name given below.
+
+host: gateway.example.com
+
+admin:
+  email: admin@example.com
+
+ingress:
+  className: traefik
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls:
+    enabled: true
+
+seedServers:
+  - slug: woo
+    name: WooCommerce store
+    url: http://store-woo-mcp.store-main.svc.cluster.local/mcp
+    auth_type: bearer
+    credentialFrom:
+      namespace: store-main
+      name: store-secrets
+      key: mcp-auth-token
+
+api:
+  image:
+    registry: ghcr.io/OWNER
+  replicas: 2
+
+dashboard:
+  image:
+    registry: ghcr.io/OWNER
+
+postgres:
+  persistence:
+    size: 10Gi

@@ -1,0 +1,17 @@
+MCP server "{{ .Release.Name }}" is deploying into namespace {{ .Release.Namespace }}.
+
+Register it in the gateway's dashboard with:
+
+  URL:         http://{{ include "mcp-server.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}{{ .Values.mcpPath }}
+{{- if .Values.auth.enabled }}
+{{- if eq (lower .Values.auth.header) "authorization" }}
+  Credential:  bearer token
+{{- else }}
+  Credential:  header {{ .Values.auth.header }}
+{{- end }}
+  Value:       kubectl -n {{ .Release.Namespace }} get secret {{ include "mcp-server.secretName" . }} -o jsonpath='{.data.token}' | base64 -d
+{{- else }}
+  Credential:  none
+{{- end }}
+
+It has no Ingress. Only the gateway's pods can reach it.

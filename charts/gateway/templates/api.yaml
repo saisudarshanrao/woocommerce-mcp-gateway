@@ -1,0 +1,136 @@
+{{- $fullname := include "gateway.fullname" . }}
+{{- $name := printf "%s-api" $fullname }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "gateway.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  selector:
+    matchLabels:
+      {{- include "gateway.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "gateway.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      annotations:
+        # The seed list is read once at startup, so a changed list restarts the pods.
+        checksum/seed: {{ .Values.seedServers | toJson | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "gateway.podSecurityContext" . | nindent 8 }}
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: api
+          image: {{ include "gateway.image" .Values.api.image | quote }}
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+          env:
+            - name: PUBLIC_URL
+              value: {{ include "gateway.url" . | quote }}
+            - name: EXTRA_ALLOWED_HOSTS
+              value: {{ include "gateway.api.allowedHosts" . | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gateway.secretName" . }}
+                  key: postgres-password
+            # $(POSTGRES_PASSWORD) is filled in by Kubernetes from the variable above.
+            - name: DATABASE_URL
+              value: "postgresql://gateway:$(POSTGRES_PASSWORD)@{{ $fullname }}-postgres:5432/gateway"
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gateway.secretName" . }}
+                  key: encryption-key
+            - name: BOOTSTRAP_ADMIN_EMAIL
+              value: {{ .Values.admin.email | quote }}
+            - name: BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gateway.secretName" . }}
+                  key: admin-password
+            - name: SEED_SERVERS_FILE
+              value: /etc/gateway/seed/servers.json
+            - name: PROBE_INTERVAL_SECONDS
+              value: {{ .Values.api.probeIntervalSeconds | quote }}
+            - name: LLM_BASE_URL
+              value: {{ .Values.llm.baseUrl | quote }}
+            - name: LLM_MODEL
+              value: {{ .Values.llm.model | quote }}
+            # Optional: without this Secret the gateway starts with the chat off.
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.llm.secretName }}
+                  key: {{ .Values.llm.secretKey }}
+                  optional: true
+            - name: LOG_LEVEL
+              value: {{ .Values.api.logLevel | quote }}
+          ports:
+            - name: http
+              containerPort: 8080
+          # Ready means migrations have run, the first round of upstream checks
+          # is done and the database answers. Liveness only asks the process.
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          securityContext:
+            {{- include "gateway.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - name: seed
+              mountPath: /etc/gateway/seed
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: seed
+          secret:
+            secretName: {{ $fullname }}-seed
+        - name: tmp
+          emptyDir: {}

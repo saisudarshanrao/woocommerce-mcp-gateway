@@ -1,0 +1,25 @@
+[project]
+name = "demo-mcp"
+version = "0.1.0"
+description = "Two small MCP servers used to exercise the gateway: a task list and a sandbox"
+requires-python = ">=3.14"
+dependencies = [
+    "mcp>=2.3,<3",
+    "uvicorn>=0.54",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "httpx2>=2.13,<3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/demo_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

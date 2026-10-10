@@ -1,0 +1,119 @@
+# The team MCP gateway: its API (REST for the dashboard, plus the single MCP
+# endpoint), the dashboard, and the Postgres database they use.
+#
+# Install one release into a namespace of its own. The chart applies a
+# namespace-wide default-deny NetworkPolicy.
+
+nameOverride: ""
+fullnameOverride: ""
+imagePullSecrets: []
+
+# Public hostname: the Ingress host, and the address in the URL that team
+# members give their MCP clients (http(s)://<host>/mcp).
+host: gateway.example.com
+
+ingress:
+  enabled: true
+  # Empty uses the cluster's default IngressClass.
+  className: ""
+  annotations: {}
+  tls:
+    # Also switches the gateway's own URL from http to https.
+    enabled: false
+    secretName: ""
+
+# The first admin, created on first start while there are no users. The
+# password is generated into the Secret; `make gateway-password` prints it.
+admin:
+  email: admin@example.com
+
+secrets:
+  # By default the chart generates the database password, the admin password
+  # and the key that encrypts upstream credentials, and keeps them across
+  # upgrades. To manage them yourself, name a Secret here with the keys
+  # postgres-password, admin-password and encryption-key.
+  existingSecret: ""
+
+# Upstream MCP servers registered on first start. A seed is applied once: an
+# admin can later edit or remove the server in the dashboard and it stays that
+# way. A credential is copied at install time from the Secret named in
+# credentialFrom, which may be in another namespace.
+seedServers: []
+#  - slug: woo
+#    name: WooCommerce store
+#    url: http://store-woo-mcp.store-main.svc.cluster.local/mcp
+#    auth_type: bearer
+#    credentialFrom:
+#      namespace: store-main
+#      name: store-secrets
+#      key: mcp-auth-token
+
+# The chat agent's model, reached through an OpenAI-compatible API. The API key
+# is not a chart value: it is read from a Secret you create (`make llm-key`).
+# Without that Secret the gateway runs normally and the chat is switched off.
+llm:
+  baseUrl: https://generativelanguage.googleapis.com/v1beta/openai
+  model: gemini-2.5-flash
+  secretName: gateway-llm
+  secretKey: api-key
+
+api:
+  image:
+    registry: ""
+    repository: gateway
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  # More than one works: the API keeps no session and no state outside Postgres.
+  replicas: 1
+  logLevel: INFO
+  # How often each upstream server is checked.
+  probeIntervalSeconds: 10
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 384Mi
+
+dashboard:
+  enabled: true
+  image:
+    registry: ""
+    repository: gateway-dashboard
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+postgres:
+  image:
+    repository: postgres
+    tag: "18.6-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 384Mi
+  # The size is fixed at first install: k3s's local-path storage cannot resize.
+  persistence:
+    size: 5Gi
+    storageClass: ""
+
+clusterDomain: cluster.local
+
+networkPolicy:
+  enabled: true
+  # Which pods are "the ingress controller". The default matches k3s's Traefik.
+  ingressController:
+    namespace: kube-system
+    podLabels:
+      app.kubernetes.io/name: traefik

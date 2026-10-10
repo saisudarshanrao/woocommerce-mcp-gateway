@@ -1,0 +1,8 @@
+The gateway is deploying into namespace {{ .Release.Namespace }}.
+
+  Dashboard:     {{ include "gateway.url" . }}/
+  MCP endpoint:  {{ include "gateway.url" . }}/mcp   (give this URL and an API key to an MCP client)
+
+Sign in as {{ .Values.admin.email }}. The password is in the Secret:
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "gateway.secretName" . }} -o jsonpath='{.data.admin-password}' | base64 -d

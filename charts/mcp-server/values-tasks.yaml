@@ -1,0 +1,5 @@
+# The team task list. It demonstrates a credential sent in a custom header.
+args: [tasks]
+auth:
+  enabled: true
+  header: X-API-Key

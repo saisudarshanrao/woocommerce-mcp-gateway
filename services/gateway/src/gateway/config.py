@@ -1,0 +1,76 @@
+"""Settings, read once from the environment at startup."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass
+from urllib.parse import urlsplit
+
+
+class ConfigError(Exception):
+    """The environment is missing something the gateway cannot start without."""
+
+
+@dataclass(frozen=True)
+class Settings:
+    database_url: str
+    # Secret material that the key for encrypting upstream credentials is derived from.
+    encryption_key: str
+    # The address people and MCP clients use, for example http://gateway.localhost.
+    public_url: str
+    bootstrap_admin_email: str = ""
+    bootstrap_admin_password: str = ""
+    # JSON file listing upstream servers to register on first start.
+    seed_servers_file: str = ""
+    # Extra Host header values to accept besides the public one (Service names).
+    extra_allowed_hosts: tuple[str, ...] = ()
+    probe_interval_seconds: float = 10.0
+    probe_timeout_seconds: float = 5.0
+    session_ttl_hours: int = 12
+    invite_ttl_hours: int = 72
+    # The chat agent's model, reached through an OpenAI-compatible API.
+    llm_base_url: str = ""
+    llm_model: str = ""
+    llm_api_key: str = ""
+    host: str = "0.0.0.0"
+    port: int = 8080
+    log_level: str = "INFO"
+
+    @property
+    def public_host(self) -> str:
+        return urlsplit(self.public_url).netloc
+
+    @property
+    def secure_cookies(self) -> bool:
+        return self.public_url.startswith("https://")
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
+        env = os.environ if env is None else env
+
+        def required(name: str) -> str:
+            value = env.get(name, "").strip()
+            if not value:
+                raise ConfigError(f"environment variable {name} is required")
+            return value
+
+        return cls(
+            database_url=required("DATABASE_URL"),
+            encryption_key=required("ENCRYPTION_KEY"),
+            public_url=required("PUBLIC_URL").rstrip("/"),
+            bootstrap_admin_email=env.get("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower(),
+            bootstrap_admin_password=env.get("BOOTSTRAP_ADMIN_PASSWORD", ""),
+            seed_servers_file=env.get("SEED_SERVERS_FILE", "").strip(),
+            extra_allowed_hosts=tuple(h.strip() for h in env.get("EXTRA_ALLOWED_HOSTS", "").split(",") if h.strip()),
+            probe_interval_seconds=float(env.get("PROBE_INTERVAL_SECONDS", "10")),
+            probe_timeout_seconds=float(env.get("PROBE_TIMEOUT_SECONDS", "5")),
+            session_ttl_hours=int(env.get("SESSION_TTL_HOURS", "12")),
+            invite_ttl_hours=int(env.get("INVITE_TTL_HOURS", "72")),
+            llm_base_url=env.get("LLM_BASE_URL", "").strip().rstrip("/"),
+            llm_model=env.get("LLM_MODEL", "").strip(),
+            llm_api_key=env.get("LLM_API_KEY", "").strip(),
+            host=env.get("HOST", "0.0.0.0"),
+            port=int(env.get("PORT", "8080")),
+            log_level=env.get("LOG_LEVEL", "INFO").upper(),
+        )

@@ -1,0 +1,31 @@
+# Local cluster (k3d). Applied on top of values.yaml by `make gateway-up`, which
+# also sets each image tag to the content hash of that image's source directory.
+
+host: gateway.localhost
+
+ingress:
+  className: traefik
+
+# The store's MCP server is registered from the start. The other two servers
+# are deployed but left for an admin to add by hand in the dashboard.
+seedServers:
+  - slug: woo
+    name: WooCommerce store
+    url: http://store-woo-mcp.store-main.svc.cluster.local/mcp
+    auth_type: bearer
+    credentialFrom:
+      namespace: store-main
+      name: store-secrets
+      key: mcp-auth-token
+
+api:
+  image:
+    registry: localhost:5001
+
+dashboard:
+  image:
+    registry: localhost:5001
+
+postgres:
+  persistence:
+    size: 1Gi
