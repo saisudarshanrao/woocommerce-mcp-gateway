@@ -23,15 +23,23 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from gateway import repo, security
 from gateway.config import Settings
 from gateway.core import Gateway, Principal
+from gateway.toolsearch import META_TOOLS, ToolSearch
 
 logger = logging.getLogger(__name__)
 
 MCP_PATH = "/mcp"
+# The same tools behind two: find_tools and call_tool. See toolsearch.py.
+SEARCH_PATH = "/mcp/search"
 
 INSTRUCTIONS = """\
 This gateway gathers the tools of several MCP servers behind one endpoint.
 Every tool is named <server>__<tool>, and its description starts with the server's name in brackets.
 The list changes when an administrator enables or disables a server.
+"""
+
+SEARCH_INSTRUCTIONS = """\
+This gateway gathers the tools of several MCP servers. Rather than listing them all, this endpoint has two tools: \
+find_tools searches them, and call_tool runs one. Tools are named <server>__<tool>.
 """
 
 
@@ -104,8 +112,8 @@ class ApiKeyAuth:
         await response(scope, receive, send)
 
 
-def build_mcp_app(gateway: Gateway, settings: Settings) -> tuple[Server, Starlette]:
-    """Returns the MCP server and its ASGI app. The app expects ApiKeyAuth in front of it."""
+def build_mcp_app(gateway: Gateway, settings: Settings) -> tuple[list[Server], ASGIApp]:
+    """Returns the MCP servers and one ASGI app serving both endpoints. It expects ApiKeyAuth in front of it."""
 
     def principal_of(ctx: ServerRequestContext) -> Principal:
         return ctx.request.state.principal
@@ -116,27 +124,48 @@ def build_mcp_app(gateway: Gateway, settings: Settings) -> tuple[Server, Starlet
     async def call_tool(ctx: ServerRequestContext, params: types.CallToolRequestParams) -> types.CallToolResult:
         return await gateway.call_tool(principal_of(ctx), params.name, dict(params.arguments or {}))
 
-    server = Server(
-        "mcp-gateway",
-        title="Team MCP gateway",
-        version=version("gateway"),
-        instructions=INSTRUCTIONS,
-        on_list_tools=list_tools,
-        on_call_tool=call_tool,
-    )
+    search = ToolSearch(gateway)
+
+    async def list_meta_tools(_: ServerRequestContext, __: types.PaginatedRequestParams | None) -> types.ListToolsResult:
+        return types.ListToolsResult(tools=META_TOOLS)
+
+    async def call_meta_tool(ctx: ServerRequestContext, params: types.CallToolRequestParams) -> types.CallToolResult:
+        return await search.call(principal_of(ctx), params.name, dict(params.arguments or {}))
+
     hosts = [settings.public_host, "localhost", "127.0.0.1", *settings.extra_allowed_hosts]
-    app = server.streamable_http_app(
-        streamable_http_path=MCP_PATH,
-        # No session is kept for any client, so every gateway replica can answer
-        # every request.
-        stateless_http=True,
-        json_response=True,
-        transport_security=TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=[form for host in hosts for form in (host, f"{host}:*")],
-            # A browser sends Origin; other MCP clients do not. Only pages served
-            # from the gateway's own address may call it from a browser.
-            allowed_origins=[settings.public_url],
-        ),
+    security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[form for host in hosts for form in (host, f"{host}:*")],
+        # A browser sends Origin; other MCP clients do not. Only pages served
+        # from the gateway's own address may call it from a browser.
+        allowed_origins=[settings.public_url],
     )
-    return server, app
+
+    def serve(path: str, instructions: str, on_list_tools, on_call_tool) -> tuple[Server, Starlette]:
+        server = Server(
+            "mcp-gateway",
+            title="Team MCP gateway",
+            version=version("gateway"),
+            instructions=instructions,
+            on_list_tools=on_list_tools,
+            on_call_tool=on_call_tool,
+        )
+        app = server.streamable_http_app(
+            streamable_http_path=path,
+            # No session is kept for any client, so every gateway replica can
+            # answer every request.
+            stateless_http=True,
+            json_response=True,
+            transport_security=security,
+        )
+        return server, app
+
+    full_server, full_app = serve(MCP_PATH, INSTRUCTIONS, list_tools, call_tool)
+    search_server, search_app = serve(SEARCH_PATH, SEARCH_INSTRUCTIONS, list_meta_tools, call_meta_tool)
+
+    async def both(scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "")
+        chosen = search_app if path == SEARCH_PATH or path.startswith(f"{SEARCH_PATH}/") else full_app
+        await chosen(scope, receive, send)
+
+    return [full_server, search_server], both

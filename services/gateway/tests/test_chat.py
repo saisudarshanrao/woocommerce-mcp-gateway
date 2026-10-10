@@ -259,3 +259,41 @@ async def test_without_a_model_the_chat_says_so_and_the_rest_works(app):
 
         assert response.status_code == 503 and "no model configured" in response.json()["detail"]
         assert (await client.get("/api/servers")).status_code == 200
+
+
+# --- too many tools to list: find_tools and call_tool ------------------------
+
+
+async def test_with_many_tools_the_model_gets_two_and_finds_the_rest(gateway, pool, servers):
+    alice = principal_for(await add_user(pool, "alice@example.com"), source="chat")
+    script = ScriptedModel(
+        calls(("find_tools", {"query": "warehouse orders"})),
+        calls(("call_tool", {"name": "warehouse__list_orders", "arguments": {}})),
+        says("One pallet is waiting."),
+    )
+    question = [{"role": "user", "content": "What is waiting in the warehouse?"}]
+    events = [event async for event in run_chat(gateway, script.model(), alice, question, search_above=3)]
+
+    # The model was offered the two search tools and told how many there really are.
+    first = script.requests[0]
+    assert [tool["function"]["name"] for tool in first["tools"]] == ["find_tools", "call_tool"]
+    assert "There are 5 tools" in first["messages"][0]["content"]
+
+    # What the search returned to the model: the matching tool, with its arguments.
+    found = json.loads(script.requests[1]["messages"][-1]["content"])["tools"]
+    assert found[0]["name"] == "warehouse__list_orders" and "input_schema" in found[0]
+
+    # The chat shows the tool that actually ran, and the audit log records it by its own name.
+    shown = [(event["name"], event["ok"]) for event in events if event["type"] == "tool_result"]
+    assert shown == [("find_tools", True), ("warehouse__list_orders", True)]
+    (entry,) = await repo.list_audit(pool)
+    assert (entry.user_email, entry.source, entry.server_slug, entry.tool) == (
+        "alice@example.com", "chat", "warehouse", "list_orders",
+    )
+
+
+async def test_below_the_threshold_every_tool_is_handed_over_as_before(gateway, pool, servers):
+    alice = principal_for(await add_user(pool, "alice@example.com"), source="chat")
+    script = ScriptedModel(says("Hello."))
+    [event async for event in run_chat(gateway, script.model(), alice, [{"role": "user", "content": "Hi"}], search_above=5)]
+    assert len(script.requests[0]["tools"]) == 5

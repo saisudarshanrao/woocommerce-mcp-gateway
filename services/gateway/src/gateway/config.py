@@ -40,6 +40,9 @@ class Settings:
     probe_timeout_seconds: float = 5.0
     session_ttl_hours: int = 12
     invite_ttl_hours: int = 72
+    # With more tools than this, the chat gives the model find_tools and
+    # call_tool instead of every tool's definition. See toolsearch.py.
+    chat_tool_search_above: int = 40
     # The chat agent's model, reached through an OpenAI-compatible API.
     llm_base_url: str = ""
     llm_model: str = ""
@@ -87,6 +90,7 @@ class Settings:
             probe_timeout_seconds=float(env.get("PROBE_TIMEOUT_SECONDS", "5")),
             session_ttl_hours=int(env.get("SESSION_TTL_HOURS", "12")),
             invite_ttl_hours=int(env.get("INVITE_TTL_HOURS", "72")),
+            chat_tool_search_above=int(env.get("CHAT_TOOL_SEARCH_ABOVE", "40")),
             llm_base_url=env.get("LLM_BASE_URL", "").strip().rstrip("/"),
             llm_model=env.get("LLM_MODEL", "").strip(),
             llm_api_key=env.get("LLM_API_KEY", "").strip(),

@@ -182,6 +182,17 @@ def run(args):
         today = mcp.call_tool("woo__list_orders", {"period": "today"})
         ok(f"woo__list_orders(today): {today['total']} order(s) since {today['period']['start']}")
 
+        print("\n== the same tools through two: find, then call")
+        search = McpClient(f"{mcp_url}/search", key["key"])
+        if tool_names(search) != ["find_tools", "call_tool"]:
+            raise Failure(f"{mcp_url}/search lists {tool_names(search)}")
+        found = search.call_tool("find_tools", {"query": "add a task"})["tools"]
+        if not found or found[0]["name"] != "tasks__add_task":
+            raise Failure(f"searching for 'add a task' found {[tool['name'] for tool in found]}")
+        echoed = search.call_tool("call_tool", {"name": "sandbox__echo", "arguments": {"text": "found by search"}})
+        ok(f"{mcp_url}/search lists 2 tools instead of {len(names)}; 'add a task' finds {found[0]['name']}; "
+           f"a tool called through it answered: {json.dumps(echoed)[:60]}")
+
         print("\n== one task that needs two servers")
         product = mcp.call_tool("woo__list_products", {"per_page": 1})["products"][0]
         task = mcp.call_tool("tasks__add_task", {"title": f"Restock {product['name']}", "notes": f"product #{product['id']}"})

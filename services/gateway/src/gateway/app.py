@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -17,7 +17,7 @@ from gateway.chat.llm import ChatModel
 from gateway.config import Settings
 from gateway.core import Gateway
 from gateway.metrics import Metrics
-from gateway.mcp_endpoint import MCP_PATH, ApiKeyAuth, build_mcp_app
+from gateway.mcp_endpoint import MCP_PATH, SEARCH_PATH, ApiKeyAuth, build_mcp_app
 from gateway.security import CredentialCipher
 from gateway.upstreams import HttpClientFactory, UpstreamManager, guarded_http_client
 from gateway.urlguard import UrlGuard
@@ -44,7 +44,7 @@ def create_app(
     )
     metrics = Metrics()
     gateway = Gateway(pool, upstreams, calls_per_minute=settings.rate_limit_per_minute, metrics=metrics)
-    mcp_server, mcp_app = build_mcp_app(gateway, settings)
+    mcp_servers, mcp_app = build_mcp_app(gateway, settings)
     if chat_model is None and settings.llm_api_key and settings.llm_model and settings.llm_base_url:
         chat_model = ChatModel(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
     app_parts = Parts(
@@ -65,9 +65,11 @@ def create_app(
         await seed.bootstrap_admin(pool, settings)
         await seed.seed_servers(pool, cipher, settings)
         await upstreams.start()
-        # The MCP app is mounted inside this one, and a mounted app's own
-        # startup never runs, so its session manager is started here.
-        async with mcp_server.session_manager.run():
+        # The MCP apps are mounted inside this one, and a mounted app's own
+        # startup never runs, so their session managers are started here.
+        async with AsyncExitStack() as running:
+            for mcp_server in mcp_servers:
+                await running.enter_async_context(mcp_server.session_manager.run())
             app_parts.ready = True
             logger.info("gateway ready at %s", settings.public_url)
             try:
@@ -114,6 +116,9 @@ def create_app(
         return {
             "public_url": settings.public_url,
             "mcp_url": f"{settings.public_url}{MCP_PATH}",
+            # The same tools presented as two, for when there are too many to list.
+            "mcp_search_url": f"{settings.public_url}{SEARCH_PATH}",
+            "chat_tool_search_above": settings.chat_tool_search_above,
             "chat_enabled": app_parts.chat_model is not None,
             "chat_model": app_parts.chat_model.model if app_parts.chat_model else "",
             "rate_limit_per_minute": settings.rate_limit_per_minute,

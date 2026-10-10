@@ -44,7 +44,9 @@ async def chat(body: ChatRequest, request: Request, user: User = Depends(current
 
     async def events() -> AsyncIterator[str]:
         # Server-sent events: one "data:" line of JSON per event.
-        async for event in run_chat(app.gateway, app.chat_model, principal, history):
+        async for event in run_chat(
+            app.gateway, app.chat_model, principal, history, search_above=app.settings.chat_tool_search_above
+        ):
             yield f"data: {json.dumps(event)}\n\n"
 
     return StreamingResponse(

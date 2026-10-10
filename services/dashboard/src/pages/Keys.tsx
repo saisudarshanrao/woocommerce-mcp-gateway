@@ -121,6 +121,10 @@ export function NewKey({ apiKey, mcpUrl, onDismiss, owner }: { apiKey: string; m
       <CodeBlock code={cursor} />
       <h3 className="mb-1.5 mt-4 text-sm font-medium text-slate-700">MCP Inspector</h3>
       <CodeBlock code={`npx @modelcontextprotocol/inspector --cli ${mcpUrl} \\\n  --header "Authorization: Bearer ${apiKey}" --method tools/list`} />
+      <p className="mt-4 text-xs text-slate-500">
+        With many servers the tool list gets long. Add <code>/search</code> to the URL ({mcpUrl}/search) and the client is given two tools
+        instead, one to find a tool and one to call it, with the same key and the same permissions.
+      </p>
     </Card>
   );
 }

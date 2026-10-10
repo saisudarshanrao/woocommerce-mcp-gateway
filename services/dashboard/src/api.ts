@@ -106,6 +106,8 @@ export interface ServerStats {
 export interface Config {
   public_url: string;
   mcp_url: string;
+  mcp_search_url: string;
+  chat_tool_search_above: number;
   chat_enabled: boolean;
   chat_model: string;
   rate_limit_per_minute: number;

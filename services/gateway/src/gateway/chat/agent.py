@@ -25,6 +25,7 @@ from mcp import types
 
 from gateway.chat.llm import ChatModel, LLMError, tool_definition
 from gateway.core import Gateway, Principal
+from gateway.toolsearch import CALL, FIND, META_TOOLS, ToolSearch
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,13 @@ Keep answers short and concrete. Give amounts with their currency, and IDs where
 The current time is {now} UTC.
 """
 
+# Added when there are too many tools to hand over at once.
+SEARCH_PROMPT = """
+There are {count} tools, too many to list here. You have two instead: find_tools searches them by \
+words and returns the matches with their arguments, and call_tool runs one by its exact name. \
+Search first, then call. To compare several servers or stores, find and call each one's tool.
+"""
+
 
 def result_text(result: types.CallToolResult) -> str:
     """What a tool returned, as the text handed back to the model."""
@@ -59,7 +67,11 @@ def result_text(result: types.CallToolResult) -> str:
 
 
 async def run_chat(
-    gateway: Gateway, model: ChatModel, principal: Principal, history: list[dict[str, str]]
+    gateway: Gateway,
+    model: ChatModel,
+    principal: Principal,
+    history: list[dict[str, str]],
+    search_above: int = 40,
 ) -> AsyncIterator[dict[str, Any]]:
     """Runs one reply and yields what happens as it happens.
 
@@ -67,11 +79,16 @@ async def run_chat(
     {"type": "error"}, and finally {"type": "done"}.
     """
     tools = await gateway.list_tools(principal)
+    system = SYSTEM_PROMPT.format(now=datetime.now(UTC).strftime("%Y-%m-%d %H:%M"))
+    # Past a few dozen tools the model gets two tools to search and call the
+    # rest with, rather than every definition on every request.
+    searching = len(tools) > search_above
+    if searching:
+        system += SEARCH_PROMPT.format(count=len(tools))
+        tools = META_TOOLS
+    search = ToolSearch(gateway)
     definitions = [tool_definition(tool) for tool in tools]
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT.format(now=datetime.now(UTC).strftime("%Y-%m-%d %H:%M"))},
-        *history,
-    ]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}, *history]
 
     try:
         for _ in range(MAX_ROUNDS):
@@ -83,16 +100,23 @@ async def run_chat(
 
             messages.append(turn.message)
             for call in turn.tool_calls:
-                yield {"type": "tool_call", "id": call.id, "name": call.name, "arguments": call.arguments}
+                name, arguments = call.name, call.arguments
+                if searching and name == CALL and isinstance(arguments.get("name"), str):
+                    # Show the tool that is really being run, not the wrapper.
+                    name, arguments = arguments["name"], arguments.get("arguments") or {}
+                yield {"type": "tool_call", "id": call.id, "name": name, "arguments": arguments}
                 started = time.perf_counter()
                 # The gateway never raises here: a failure comes back as a
                 # result the model can read, and is audited either way.
-                result = await gateway.call_tool(principal, call.name, call.arguments)
+                if searching and call.name in (FIND, CALL):
+                    result = await search.call(principal, call.name, call.arguments)
+                else:
+                    result = await gateway.call_tool(principal, call.name, call.arguments)
                 text = result_text(result)
                 yield {
                     "type": "tool_result",
                     "id": call.id,
-                    "name": call.name,
+                    "name": name,
                     "ok": not result.is_error,
                     "duration_ms": int((time.perf_counter() - started) * 1000),
                     "preview": text[:400],
