@@ -17,33 +17,41 @@ from gateway.config import Settings
 from gateway.core import Gateway
 from gateway.mcp_endpoint import MCP_PATH, ApiKeyAuth, build_mcp_app
 from gateway.security import CredentialCipher
-from gateway.upstreams import HttpClientFactory, UpstreamManager, default_http_client
+from gateway.upstreams import HttpClientFactory, UpstreamManager, guarded_http_client
+from gateway.urlguard import UrlGuard
 
 logger = logging.getLogger(__name__)
 
 
 def create_app(
     settings: Settings,
-    http_client_factory: HttpClientFactory = default_http_client,
+    http_client_factory: HttpClientFactory | None = None,
     chat_model: ChatModel | None = None,
 ) -> FastAPI:
     # Everything is wired together here without touching the network. The
     # database pool connects, and probing begins, when the app starts up.
     pool = db.Database(settings.database_url)
     cipher = CredentialCipher(settings.encryption_key)
+    url_guard = UrlGuard(settings.upstream_internal_hosts, settings.upstream_allow_public)
     upstreams = UpstreamManager(
         pool,
         cipher,
         probe_interval_seconds=settings.probe_interval_seconds,
         probe_timeout_seconds=settings.probe_timeout_seconds,
-        http_client_factory=http_client_factory,
+        http_client_factory=http_client_factory or guarded_http_client(url_guard),
     )
     gateway = Gateway(pool, upstreams)
     mcp_server, mcp_app = build_mcp_app(gateway, settings)
     if chat_model is None and settings.llm_api_key and settings.llm_model and settings.llm_base_url:
         chat_model = ChatModel(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
     app_parts = Parts(
-        settings=settings, pool=pool, cipher=cipher, upstreams=upstreams, gateway=gateway, chat_model=chat_model
+        settings=settings,
+        pool=pool,
+        cipher=cipher,
+        upstreams=upstreams,
+        gateway=gateway,
+        url_guard=url_guard,
+        chat_model=chat_model,
     )
 
     @asynccontextmanager

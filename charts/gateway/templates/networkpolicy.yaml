@@ -41,9 +41,58 @@ spec:
         - protocol: TCP
           port: http
 ---
+# What the API may connect to. Its job is to call MCP servers at addresses an
+# admin types in, so this is the network's half of the guard in urlguard.py:
+# inside the cluster it reaches DNS, its database and pods labelled as MCP
+# servers, and nothing else. Not the Kubernetes API, not a store's WordPress or
+# database, not a cloud metadata address. Outside the cluster it reaches the
+# public internet, for MCP servers hosted elsewhere and for the model's API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-api-egress
+  labels:
+    {{- include "gateway.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "gateway.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.dns.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.dns.podLabels | nindent 14 }}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "gateway.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.upstreamPodLabels | nindent 14 }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- toYaml .Values.networkPolicy.privateRanges | nindent 14 }}
+---
 # Postgres: the API is its only client, and it opens no connections itself.
-# The API's own outbound traffic is left open: it has to reach upstream MCP
-# servers wherever an admin registers them, and the model's API.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

@@ -88,6 +88,10 @@ spec:
                   key: admin-password
             - name: SEED_SERVERS_FILE
               value: /etc/gateway/seed/servers.json
+            - name: UPSTREAM_INTERNAL_HOSTS
+              value: {{ join "," .Values.upstreams.internalHosts | quote }}
+            - name: UPSTREAM_ALLOW_PUBLIC
+              value: {{ .Values.upstreams.allowPublic | quote }}
             - name: PROBE_INTERVAL_SECONDS
               value: {{ .Values.api.probeIntervalSeconds | quote }}
             - name: LLM_BASE_URL

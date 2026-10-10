@@ -139,6 +139,20 @@ def run(args):
             ok(f"'{created['slug']}' connected with {len(created['tools'])} tools, credential "
                f"{'stored and not returned' if created['auth']['credential_set'] else 'not needed'}")
 
+        print("\n== the admin tries to point the gateway at things only the cluster can reach")
+        forbidden = {
+            "a cloud metadata address": "http://169.254.169.254/latest/meta-data/",
+            "the gateway's own database": f"http://{args.release}-postgres.{args.namespace}.svc.cluster.local:5432/",
+            "the Kubernetes API": "https://kubernetes.default.svc.cluster.local/",
+            "the store's WordPress": "http://store-wordpress.store-main.svc.cluster.local/",
+            "the gateway itself": "http://127.0.0.1:8080/mcp",
+        }
+        for what, url in forbidden.items():
+            refused = admin.call("POST", "/api/servers", {"slug": "ssrf-probe", "name": "Probe", "url": url}, expect=(422,))
+            ok(f"{what}: refused. {refused['detail']}"[:170])
+        if server_named(admin, "ssrf-probe"):
+            raise Failure("a refused server was registered anyway")
+
         print("\n== a member joins by invitation and creates an API key")
         email = f"smoke-{int(time.time())}@example.com"
         invite = admin.call("POST", "/api/invites", {"email": email, "role": "member"})

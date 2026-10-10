@@ -5,7 +5,9 @@
 #             server, the gateway's database, the gateway's API except via Ingress
 #   allowed   the gateway's API pod -> every MCP server
 #   blocked   another pod in the gateway's namespace -> an MCP server
-#   blocked   the gateway's API pod -> WordPress, MariaDB
+#   blocked   the gateway's API pod -> WordPress, MariaDB, the Kubernetes API,
+#             a metadata address
+#   allowed   the gateway's API pod -> its database, the internet
 #   allowed   the store's MCP server -> its own WordPress
 #   blocked   the store's MCP server -> MariaDB, the Kubernetes API, the internet
 #   blocked   MariaDB -> anything
@@ -105,6 +107,16 @@ if k -n "$GATEWAY_NS" get deploy gateway-api >/dev/null 2>&1; then
   fi
   must_not_connect "the gateway's API pod -> WordPress (not its business)" "$GATEWAY_NS" "$API" "$WORDPRESS" 80
   must_not_connect "the gateway's API pod -> MariaDB"                     "$GATEWAY_NS" "$API" "$MARIADB" 3306
+  # The API connects wherever an admin's URL points, so its own outbound rules
+  # are what stop it being used to reach the rest of the cluster.
+  must_connect     "the gateway's API pod -> its database"                "$GATEWAY_NS" "$API" gateway-postgres 5432
+  must_not_connect "the gateway's API pod -> Kubernetes API (by Service)" "$GATEWAY_NS" "$API" 10.43.0.1 443
+  node_ip="$(k get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')"
+  must_not_connect "the gateway's API pod -> Kubernetes API (on the node)" "$GATEWAY_NS" "$API" "$node_ip" 6443
+  must_not_connect "the gateway's API pod -> a cloud metadata address"    "$GATEWAY_NS" "$API" 169.254.169.254 80
+  if nc -z -G 3 1.1.1.1 443 >/dev/null 2>&1; then
+    must_connect   "the gateway's API pod -> the internet (the model's API lives there)" "$GATEWAY_NS" "$API" 1.1.1.1 443
+  fi
   probe_pod "$GATEWAY_NS" bystander
   must_connect     "another pod beside it -> Kubernetes API (control)"    "$GATEWAY_NS" bystander kubernetes.default.svc.cluster.local 443
   must_not_connect "another pod beside it -> the store's MCP server"      "$GATEWAY_NS" bystander "$WOO_MCP" 80

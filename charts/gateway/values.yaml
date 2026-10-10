@@ -48,6 +48,20 @@ seedServers: []
 #      name: store-secrets
 #      key: mcp-auth-token
 
+# Where the gateway may connect as an MCP client. An admin registers servers by
+# typing a URL, so without a limit the gateway could be pointed at things only
+# the cluster can reach. Two layers hold the line: the gateway checks the
+# address before every connection (and says why when it refuses), and the
+# NetworkPolicy on its outbound traffic enforces the same in the network.
+upstreams:
+  # Host names of MCP servers inside the cluster, as patterns. A name that
+  # resolves to a private address is refused unless it matches one of these.
+  internalHosts:
+    - "*.mcp-servers.svc.cluster.local"
+    - "*-woo-mcp.store-*.svc.cluster.local"
+  # MCP servers on the public internet.
+  allowPublic: true
+
 # The chat agent's model, reached through an OpenAI-compatible API. The API key
 # is not a chart value: it is read from a Secret you create (`make llm-key`).
 # Without that Secret the gateway runs normally and the chat is switched off.
@@ -117,3 +131,22 @@ networkPolicy:
     namespace: kube-system
     podLabels:
       app.kubernetes.io/name: traefik
+  # Which pods are the cluster's DNS. The default matches k3s's CoreDNS.
+  dns:
+    namespace: kube-system
+    podLabels:
+      k8s-app: kube-dns
+  # Inside the cluster the API may connect only to pods that carry these labels,
+  # in any namespace. The store chart and the mcp-server chart put them on
+  # their MCP server pods, and on nothing else.
+  upstreamPodLabels:
+    mcp-gateway/upstream: "true"
+  # Everything that is not the public internet. The API may connect to any
+  # address outside these ranges: MCP servers hosted elsewhere, and the model.
+  privateRanges:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 169.254.0.0/16
+    - 127.0.0.0/8

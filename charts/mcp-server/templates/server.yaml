@@ -44,6 +44,9 @@ spec:
     metadata:
       labels:
         {{- include "mcp-server.selectorLabels" . | nindent 8 }}
+        # Marks the pod as an MCP server: the gateway's own NetworkPolicy lets
+        # its API connect to pods with this label and to no others.
+        mcp-gateway/upstream: "true"
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false

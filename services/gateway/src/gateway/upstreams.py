@@ -35,6 +35,7 @@ from pydantic import ValidationError
 from gateway import naming, repo
 from gateway.repo import Server
 from gateway.security import CredentialCipher
+from gateway.urlguard import BlockedAddress, GuardedTransport, UrlGuard
 
 logger = logging.getLogger(__name__)
 
@@ -78,11 +79,20 @@ class UpstreamState:
     skipped: list[dict[str, str]] = field(default_factory=list)
 
 
-def default_http_client(server: Server, headers: dict[str, str], timeout: float) -> httpx2.AsyncClient:
-    return httpx2.AsyncClient(
-        headers=headers,
-        timeout=httpx2.Timeout(timeout, connect=min(CONNECT_TIMEOUT_SECONDS, timeout)),
-    )
+def guarded_http_client(guard: UrlGuard) -> HttpClientFactory:
+    """The HTTP client used for every upstream connection outside the tests."""
+
+    def build(server: Server, headers: dict[str, str], timeout: float) -> httpx2.AsyncClient:
+        return httpx2.AsyncClient(
+            headers=headers,
+            timeout=httpx2.Timeout(timeout, connect=min(CONNECT_TIMEOUT_SECONDS, timeout)),
+            transport=GuardedTransport(guard),
+            # A redirect is a way of sending the gateway somewhere the admin did
+            # not type. An MCP endpoint has no reason to answer with one.
+            follow_redirects=False,
+        )
+
+    return build
 
 
 def _leaves(error: BaseException) -> list[BaseException]:
@@ -104,6 +114,8 @@ def explain(error: BaseException, statuses: list[int]) -> tuple[str, str]:
     status = statuses[-1] if statuses else None
 
     for leaf in leaves:
+        if isinstance(leaf, BlockedAddress):
+            return "unreachable", f"the gateway will not connect there: {leaf.reason}"
         if isinstance(leaf, httpx2.ConnectError):
             text = str(leaf).lower()
             if any(hint in text for hint in ("name or service", "nodename", "name resolution", "no address")):
@@ -140,14 +152,14 @@ class UpstreamManager:
         *,
         probe_interval_seconds: float = 10.0,
         probe_timeout_seconds: float = 5.0,
-        http_client_factory: HttpClientFactory = default_http_client,
+        http_client_factory: HttpClientFactory | None = None,
     ):
         self._pool = pool
         self._cipher = cipher
         self._probe_interval = probe_interval_seconds
         self._probe_timeout = probe_timeout_seconds
         # Tests replace this to reach in-process fake servers.
-        self._http_client_factory = http_client_factory
+        self._http_client_factory = http_client_factory or guarded_http_client(UrlGuard())
         self._states: dict[UUID, UpstreamState] = {}
         self._task: asyncio.Task[None] | None = None
         self._client_info = types.Implementation(name="mcp-gateway", version=version("gateway"))

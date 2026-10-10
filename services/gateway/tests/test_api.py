@@ -478,3 +478,20 @@ async def test_the_first_admin_is_created_only_when_there_are_no_users(pool):
 
     users = await repo.list_users(pool)
     assert [(user.email, user.role) for user in users] == [("first@example.com", "admin")]
+
+
+async def test_a_server_url_pointing_inside_the_cluster_or_at_metadata_is_refused(app, admin):
+    new = {"slug": "evil", "name": "Evil", "url": "http://169.254.169.254/latest/meta-data/"}
+    refused = await admin.post("/api/servers", json=new)
+    assert refused.status_code == 422
+    assert "link-local" in refused.json()["detail"]
+
+    for url in ("http://127.0.0.1:5432/", "https://10.43.0.1/", "http://user:secret@shop.test/mcp"):
+        assert (await admin.post("/api/servers", json=new | {"url": url})).status_code == 422, url
+    assert all(server["slug"] != "evil" for server in (await admin.get("/api/servers")).json())
+
+    # Editing an existing server is held to the same rule.
+    shop = next(server for server in (await admin.get("/api/servers")).json() if server["slug"] == "shop")
+    edited = await admin.patch(f"/api/servers/{shop['id']}", json={"url": "http://[::1]/mcp"})
+    assert edited.status_code == 422
+    assert "loopback" in edited.json()["detail"]

@@ -15,6 +15,7 @@ from gateway.core import Gateway
 from gateway.repo import User
 from gateway.security import CredentialCipher
 from gateway.upstreams import UpstreamManager
+from gateway.urlguard import UrlGuard
 
 SESSION_COOKIE = "gateway_session"
 
@@ -28,6 +29,7 @@ class Parts:
     cipher: CredentialCipher
     upstreams: UpstreamManager
     gateway: Gateway
+    url_guard: UrlGuard
     # None when no model API key is configured; the chat is then switched off.
     chat_model: ChatModel | None = None
     ready: bool = False

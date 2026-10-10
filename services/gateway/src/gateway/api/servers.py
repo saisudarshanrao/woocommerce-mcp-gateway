@@ -13,6 +13,7 @@ from gateway import naming, repo
 from gateway.api.deps import admin_user, current_user, parts
 from gateway.repo import Server, User
 from gateway.upstreams import UpstreamState
+from gateway.urlguard import BlockedAddress, UrlGuard
 
 router = APIRouter(prefix="/api", tags=["servers"])
 
@@ -44,10 +45,19 @@ class ServerChange(BaseModel):
     enabled: bool | None = None
 
 
-def check_url(url: str) -> str:
+async def check_url(url: str, guard: UrlGuard) -> str:
+    """The URL if the gateway may connect to it; otherwise a refusal that says why."""
     parsed = urlsplit(url.strip())
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise HTTPException(422, "The URL must start with http:// or https:// and name a host.")
+    if parsed.username or parsed.password:
+        raise HTTPException(422, "Put the credential in the credential field, not in the URL.")
+    try:
+        # A host that does not resolve yet is accepted: the server will simply
+        # show as unreachable. The same check runs again on every connection.
+        await guard.check(url.strip())
+    except BlockedAddress as blocked:
+        raise HTTPException(422, f"The gateway will not connect to that address: {blocked.reason}.") from blocked
     return url.strip()
 
 
@@ -122,7 +132,7 @@ async def add_server(body: NewServer, request: Request, admin: User = Depends(ad
         created_by=admin.id,
         slug=slug,
         name=body.name.strip(),
-        url=check_url(body.url),
+        url=await check_url(body.url, app.url_guard),
         auth_type=body.auth_type,
         auth_header=body.auth_header.strip() if body.auth_type == "header" and body.auth_header else None,
         auth_secret=app.cipher.encrypt(body.credential) if body.auth_type != "none" else None,
@@ -144,7 +154,7 @@ async def change_server(
 
     changes: dict[str, Any] = body.model_dump(exclude_unset=True, exclude={"credential"})
     if "url" in changes:
-        changes["url"] = check_url(changes["url"])
+        changes["url"] = await check_url(changes["url"], app.url_guard)
     auth_type = changes.get("auth_type", current.auth_type)
     if auth_type == "none":
         changes |= {"auth_header": None, "auth_secret": None}
