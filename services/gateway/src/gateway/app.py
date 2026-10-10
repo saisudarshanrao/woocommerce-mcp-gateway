@@ -10,8 +10,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from gateway import db, repo, seed
-from gateway.api import auth, members, servers
+from gateway.api import auth, chat, members, servers
 from gateway.api.deps import Parts
+from gateway.chat.llm import ChatModel
 from gateway.config import Settings
 from gateway.core import Gateway
 from gateway.mcp_endpoint import MCP_PATH, ApiKeyAuth, build_mcp_app
@@ -21,7 +22,11 @@ from gateway.upstreams import HttpClientFactory, UpstreamManager, default_http_c
 logger = logging.getLogger(__name__)
 
 
-def create_app(settings: Settings, http_client_factory: HttpClientFactory = default_http_client) -> FastAPI:
+def create_app(
+    settings: Settings,
+    http_client_factory: HttpClientFactory = default_http_client,
+    chat_model: ChatModel | None = None,
+) -> FastAPI:
     # Everything is wired together here without touching the network. The
     # database pool connects, and probing begins, when the app starts up.
     pool = db.Database(settings.database_url)
@@ -35,7 +40,11 @@ def create_app(settings: Settings, http_client_factory: HttpClientFactory = defa
     )
     gateway = Gateway(pool, upstreams)
     mcp_server, mcp_app = build_mcp_app(gateway, settings)
-    app_parts = Parts(settings=settings, pool=pool, cipher=cipher, upstreams=upstreams, gateway=gateway)
+    if chat_model is None and settings.llm_api_key and settings.llm_model and settings.llm_base_url:
+        chat_model = ChatModel(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
+    app_parts = Parts(
+        settings=settings, pool=pool, cipher=cipher, upstreams=upstreams, gateway=gateway, chat_model=chat_model
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -89,13 +98,14 @@ def create_app(settings: Settings, http_client_factory: HttpClientFactory = defa
         return {
             "public_url": settings.public_url,
             "mcp_url": f"{settings.public_url}{MCP_PATH}",
-            "chat_enabled": bool(settings.llm_api_key and settings.llm_model and settings.llm_base_url),
-            "chat_model": settings.llm_model,
+            "chat_enabled": app_parts.chat_model is not None,
+            "chat_model": app_parts.chat_model.model if app_parts.chat_model else "",
         }
 
     app.include_router(auth.router)
     app.include_router(members.router)
     app.include_router(servers.router)
+    app.include_router(chat.router)
 
     @app.exception_handler(Exception)
     async def unexpected(_: Request, error: Exception) -> JSONResponse:

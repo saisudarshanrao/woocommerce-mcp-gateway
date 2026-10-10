@@ -9,6 +9,7 @@ import asyncpg
 from fastapi import Depends, HTTPException, Request, Response
 
 from gateway import repo, security
+from gateway.chat.llm import ChatModel
 from gateway.config import Settings
 from gateway.core import Gateway
 from gateway.repo import User
@@ -27,6 +28,8 @@ class Parts:
     cipher: CredentialCipher
     upstreams: UpstreamManager
     gateway: Gateway
+    # None when no model API key is configured; the chat is then switched off.
+    chat_model: ChatModel | None = None
     ready: bool = False
 
 

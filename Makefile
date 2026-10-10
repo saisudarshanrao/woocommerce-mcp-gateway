@@ -34,7 +34,7 @@ DASHBOARD_TAG      = $(shell ./scripts/image-tag.sh services/dashboard)
         store-image store-up store-down store-status store-logs store-password store-smoke \
         mcp-test mcp-smoke isolation-smoke \
         mcp-servers-up mcp-servers-down tasks-token \
-        gateway-image gateway-up gateway-down gateway-status gateway-logs gateway-password gateway-test \
+        gateway-image gateway-up gateway-down gateway-status gateway-logs gateway-password gateway-test gateway-smoke \
         llm-key up down
 
 help: ## List the available targets
@@ -145,6 +145,10 @@ gateway-password: ## Print the gateway admin's password
 
 gateway-test: ## Run the gateway's unit tests (starts a throwaway Postgres in Docker)
 	cd services/gateway && uv run pytest -q
+
+gateway-smoke: ## Walk the two-user flow: add servers, invite a member, use tools, revoke, check the audit log
+	@python3 scripts/smoke_gateway.py --context $(KUBE_CONTEXT) \
+		--namespace $(GATEWAY_NAMESPACE) --release $(GATEWAY_RELEASE)
 
 llm-key: ## Store the chat model's API key (from the LLM_API_KEY environment variable) and restart the API
 	@test -n "$$LLM_API_KEY" || { echo "Set LLM_API_KEY in the environment first: LLM_API_KEY=... make llm-key"; exit 1; }

@@ -26,6 +26,11 @@ metadata:
     app.kubernetes.io/component: api
 spec:
   replicas: {{ .Values.api.replicas }}
+  # A new pod has to be ready for this long before an old one is taken away.
+  # The network policy that lets the ingress controller reach a pod learns a
+  # new pod's address a moment after it starts; without the pause a rollout
+  # could briefly leave only pods that Traefik is not yet allowed to reach.
+  minReadySeconds: 5
   selector:
     matchLabels:
       {{- include "gateway.selectorLabels" . | nindent 6 }}
@@ -41,6 +46,9 @@ spec:
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
+      # A pod being replaced keeps serving for a few seconds after it is told to
+      # stop, which is how long the ingress controller takes to stop sending to it.
+      terminationGracePeriodSeconds: 20
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -118,6 +126,10 @@ spec:
               port: http
             periodSeconds: 20
             timeoutSeconds: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
           securityContext:
