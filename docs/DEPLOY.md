@@ -93,6 +93,13 @@ only the pods whose image or settings actually changed.
 | Extra MCP servers | `make mcp-servers-up` | Rolling update. The task list is in memory and is emptied. |
 | Store (WordPress, WooCommerce) | `make store-up` | The pod is replaced, not rolled: its volume can be mounted by one pod at a time, so expect about half a minute of downtime. On start the setup container brings WooCommerce up to the version pinned in the image and runs its database migrations. |
 | MariaDB, Postgres | change the image tag in values, then the same commands | The pod restarts on the same volume. MariaDB runs its own upgrade step when it meets an older data directory. |
+| Provisioner | `make gateway-up` | The old pod stops before the new one starts. Stores being created at that moment are picked up again where they were. |
+| Stores created from the dashboard | not upgraded automatically | Each is its own Helm release (`store` in `store-<slug>`). Upgrade one with `helm upgrade` and the same values, or delete and recreate it. |
+
+Change settings through the charts' values, never by editing an object in the
+cluster. Helm applies its changes server-side and refuses to overwrite a field
+that another tool set (a `kubectl set env`, for instance); if that has happened,
+one `helm upgrade ... --force-conflicts` takes the field back.
 
 ## Rolling back
 

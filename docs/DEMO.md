@@ -69,6 +69,11 @@ Passwords and tokens you will need:
    *You see `woo__list_orders` with `{"period":"today"}`, and the answer names
    the order you just placed.*
 
+`make chat-smoke` runs these three steps against the real model and checks the
+storefront and the audit log, so it is a quick way to confirm the chat works
+before recording. The free tier allows only a few requests a minute; if the chat
+says the model is busy, wait a minute.
+
 ## 4. External MCP client, as user B
 
 1. In user B's window open **API keys** and create a key. Copy the

@@ -49,7 +49,7 @@ DASHBOARD_TAG      = $(shell ./scripts/image-tag.sh services/dashboard)
         mcp-test mcp-smoke isolation-smoke \
         mcp-servers-up mcp-servers-down tasks-token \
         gateway-image gateway-up gateway-down gateway-status gateway-logs gateway-password gateway-test gateway-smoke \
-        stores-smoke llm-key up down smoke test
+        stores-smoke chat-smoke llm-key up down smoke test
 
 help: ## List the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -193,5 +193,11 @@ test: ## Run every unit test suite
 stores-smoke: ## Create two stores from the dashboard's API, compare their orders, check isolation, delete one
 	@python3 scripts/smoke_stores.py --url $(GATEWAY_URL) --context $(KUBE_CONTEXT) \
 		--namespace $(GATEWAY_NAMESPACE) --release $(GATEWAY_RELEASE)
+
+# Not part of `make smoke`: it needs the model's API key and uses the free tier's quota.
+chat-smoke: ## Ask the real model to create a product and report today's orders; STORES=1 adds the two-store comparison
+	@python3 scripts/smoke_chat.py --gateway-url $(GATEWAY_URL) --store-url $(STORE_URL) --context $(KUBE_CONTEXT) \
+		--gateway-namespace $(GATEWAY_NAMESPACE) --gateway-release $(GATEWAY_RELEASE) \
+		--store-namespace $(STORE_NAMESPACE) --store-release $(STORE_RELEASE) $(if $(STORES),--stores,)
 
 smoke: store-smoke mcp-smoke gateway-smoke isolation-smoke stores-smoke ## Run every end-to-end check against the cluster

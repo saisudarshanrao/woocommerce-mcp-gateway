@@ -5,9 +5,9 @@ what order, and why each choice was made. Section 4 covers the mechanisms the
 brief asks to be documented and defended.
 
 **Status:** every layer is built and verified end to end on the local cluster,
-including the multi-store bonus, with one exception: the chat agent has run only
-against a scripted stand-in for the model, and still needs a first run against
-the real one.
+including the multi-store bonus and the chat agent against the real model
+(`make chat-smoke`). Not done: a deployment to a real VPS, and hosted MCP
+servers by image.
 
 ## 1. Architecture
 
@@ -500,14 +500,14 @@ Each milestone ends on something from the brief's definition of done.
 | M2 | woo-mcp | The five required tools work from MCP Inspector over a temporary port-forward. A pod in another namespace cannot connect. **Done:** `make mcp-test`, `make mcp-smoke`, `make isolation-smoke`. |
 | M3 | Gateway core, plus the tasks and sandbox servers | A client given only the gateway URL and a key lists the tools of all three servers, answers the orders question and runs a two-server task. A revoked key is rejected. Killing one upstream pod leaves the others working. **Done:** `make gateway-smoke` walks all of it; also run with two API replicas. |
 | M4 | Dashboard | Every admin and member user story is clickable. No response body ever contains an upstream credential. **Done:** clicked through in a browser; the credential rule is a unit test. |
-| M5 | Chat agent | Creates a product that appears on the storefront, then reports today's orders. Tool calls are shown in the chat and audited as the logged-in user. **Built and unit-tested against a scripted model. Not yet run against the real one.** |
+| M5 | Chat agent | Creates a product that appears on the storefront, then reports today's orders. Tool calls are shown in the chat and audited as the logged-in user. **Done:** `make chat-smoke` runs exactly this against Gemini; `STORES=1` adds the two-store comparison. |
 | M6 | Submission pass | `values-prod.yaml` for each chart, README (run, deploy, design), a demo script that walks every definition-of-done line. **Done:** [DEMO.md](DEMO.md), [DEPLOY.md](DEPLOY.md). |
 
 Beyond the core, from the brief's list of extras:
 
 | Extra | State |
 |---|---|
-| Multi-store bonus | Done, see 4.10. `make stores-smoke` creates two stores at once, kills the provisioner midway, compares the stores' orders through the gateway, checks isolation and the provisioner's permissions, and deletes a store. The one part not yet run is asking the *chat agent* to do the comparison, which needs the model's key. |
+| Multi-store bonus | Done, see 4.10. `make stores-smoke` creates two stores at once, kills the provisioner midway, compares the stores' orders through the gateway, checks isolation and the provisioner's permissions, and deletes a store. `make chat-smoke STORES=1` runs the bonus's own test: the chat agent compares today's orders across two stores, one is deleted, and its tools and namespace are gone. |
 | Security hardening | Done: SSRF guard in the application and in the network (4.8), least-privilege RBAC plus an admission policy for the one component that talks to the Kubernetes API (4.10), deny-by-default NetworkPolicies in both directions, every container non-root on a read-only filesystem, upstream credentials encrypted at rest. |
 | Tool permissions | Done per server: members may use every tool, only read-only tools, or none. Hidden from the list and refused if called directly. |
 | Scaling | Verified with two API replicas. Rate limit per key, counted in Postgres so it holds across replicas (4.9). |
@@ -584,12 +584,25 @@ Confirmed while building the extras:
   when checked and a private one when used. The check and the connection now use
   the same resolved address.
 
-Still open:
+Confirmed on the first runs against the real model:
 
-* **The chat agent has not met the real model.** Its loop, tool definitions and
-  error handling are tested against a scripted stand-in. Whether Gemini accepts
-  the reduced tool schemas, and how tight the free tier's rate limits are in
-  practice, will only show on a real run.
+* **Gemini accepts the reduced tool schemas as they are**, and the loop works
+  unchanged: the assistant message is echoed back verbatim, which carries the
+  "thought signature" Gemini attaches to a tool call and wants to see again.
+* **The newest model is not always the usable one.** On the free tier,
+  `gemini-3.8-flash` (and 3.7) accepted the key but did not answer a chat
+  request within a minute, from the cluster or from the laptop. `gemini-3.5-flash`
+  answers in about a second and is the default. Listing the models the key can
+  use (`GET <base URL>/models`) was the quick way to find out. The chat showed
+  "The model took too long to answer" rather than hanging, as designed.
+* **With only the two search tools the model does search first.** With the
+  threshold lowered to 3, it called `find_tools`, then the tool it found.
+* **Do not edit a Helm-managed object by hand.** A `kubectl set env` on the API
+  Deployment made the next `helm upgrade` fail: Helm 4 applies server-side and
+  refuses to overwrite a field another tool has set. Change the value in the
+  chart instead; `helm upgrade --force-conflicts` takes the field back.
+
+Still open:
 * **Store email is not delivered.** There is no mail server in the cluster, so
   WooCommerce's order emails fail quietly. Orders are unaffected.
 * **Volume sizes are fixed at first install.** k3s's local-path storage cannot
@@ -601,9 +614,9 @@ Still open:
 ## 9. Decisions made
 
 1. **Backend language: Python.**
-2. **LLM for the chat agent: Gemini on the free tier**, reached through its
-   OpenAI-compatible API. Changing provider is three settings: base URL, model
-   and key.
+2. **LLM for the chat agent: Gemini on the free tier** (`gemini-3.5-flash`),
+   reached through its OpenAI-compatible API. Changing provider is three
+   settings: base URL, model and key.
 
 ## 10. What to be able to explain
 

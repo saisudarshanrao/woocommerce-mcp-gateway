@@ -67,7 +67,10 @@ upstreams:
 # Without that Secret the gateway runs normally and the chat is switched off.
 llm:
   baseUrl: https://generativelanguage.googleapis.com/v1beta/openai
-  model: gemini-3.8-flash
+  # Any model the key can use that supports tool calls. On the free tier in
+  # October 2026 the newest flash models (3.7, 3.8) accepted the key but did not
+  # answer a chat request within a minute; this one answers in about a second.
+  model: gemini-3.5-flash
   secretName: gateway-llm
   secretKey: api-key
   # With more tools than this the chat gives the model two tools, one to find

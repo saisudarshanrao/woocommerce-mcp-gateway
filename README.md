@@ -124,6 +124,15 @@ runs five end-to-end checks against the cluster:
 | `make stores-smoke` | Two stores created at once from the dashboard's API, with the provisioner killed midway; their orders compared through the gateway; one store unable to reach the other; what the provisioner may do in the cluster; a store deleted, tools and volumes gone |
 
 ```bash
+make chat-smoke
+```
+
+is separate, because it calls the real model and so needs the key and uses its
+quota: the chat agent creates a product, which appears on the storefront, then
+reports an order placed there. `make chat-smoke STORES=1` adds the bonus's test,
+the agent comparing today's orders across two freshly created stores.
+
+```bash
 make test
 ```
 
