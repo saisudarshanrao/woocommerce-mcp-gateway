@@ -156,9 +156,10 @@ def run(args):
         if changed["hosted"]["status"] != "deploying":
             raise Failure(f"changing the arguments did not start a deployment: {changed['hosted']}")
         wait_until(admin, SLUG, lambda s: up(s) and any(tool["name"] == f"{SLUG}__echo" for tool in s["tools"]))
-        names = tool_names(mcp)
-        if f"{SLUG}__add_task" in names or f"{SLUG}__echo" not in names:
-            raise Failure("after the change the gateway still lists the old tools")
+        # With several gateway replicas, each notices the change on its own next look.
+        wait_for("every gateway replica lists the new tools", lambda: all(
+            f"{SLUG}__echo" in (names := tool_names(mcp)) and f"{SLUG}__add_task" not in names for _ in range(4)
+        ), seconds=30)
         ok(f"redeployed with other arguments: its tools are now {SLUG}__echo and friends, and the task tools are gone")
 
         print("\n== an image that cannot start")

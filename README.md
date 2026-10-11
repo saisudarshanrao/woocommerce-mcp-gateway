@@ -43,7 +43,7 @@ done.
 | [docs/ASSIGNMENT.md](docs/ASSIGNMENT.md) | The brief this is built against |
 | [docs/PLAN.md](docs/PLAN.md) | Design decisions and the reasoning behind each |
 | [docs/DEMO.md](docs/DEMO.md) | The definition of done, step by step, with two users |
-| [docs/DEPLOY.md](docs/DEPLOY.md) | Deploying to a VPS, upgrading and rolling back |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | Deploying to a VPS, rehearsing that on your own machine, upgrading and rolling back |
 | [services/gateway/README.md](services/gateway/README.md) | How a tool call flows; the naming scheme; timeouts; credentials |
 | [services/woo-mcp/README.md](services/woo-mcp/README.md) | How the MCP server talks to the store and why; MCP on the wire |
 
@@ -141,6 +141,10 @@ make test
 runs the unit tests: the gateway's start a throwaway Postgres in Docker and run
 fake upstream servers in-process.
 
+To try the production deployment without renting a server,
+`scripts/vps-rehearsal.sh` builds a stand-in for one: a separate Ubuntu VM with
+k3s, HTTPS and the production values. [docs/DEPLOY.md](docs/DEPLOY.md) explains.
+
 `make help` lists every target. `make down` removes everything; `make
 cluster-down` deletes the cluster.
 
@@ -191,6 +195,7 @@ services/
 images/
   wordpress/    The store image: Dockerfile, wp-config.php, setup script
 deploy/local/   The k3d cluster definition
+deploy/sites/   One directory per production deployment: its hostnames and emails
 scripts/        Cluster bring-up, image builds, end-to-end checks
 docs/           The assignment, the design, the demo script, deployment
 ```

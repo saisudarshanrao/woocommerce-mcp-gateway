@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 
 from smoke_mcp import McpClient
-from smoke_store import Failure, ok
+from smoke_store import Failure, https_handler, ok
 
 MCP_NAMESPACE = "mcp-servers"
 
@@ -44,7 +44,9 @@ class Dashboard:
 
     def __init__(self, base_url):
         self.base_url = base_url
-        self._opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        self._opener = urllib.request.build_opener(
+            https_handler(), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+        )
 
     def landing(self, url):
         """Opens a link as this browser would, following redirects, and returns where it ends up."""

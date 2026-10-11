@@ -704,3 +704,20 @@ async def test_a_server_added_by_url_cannot_be_redeployed_or_turned_into_an_imag
     assert shop["hosted"] is None
     assert (await admin.post(f"/api/servers/{shop['id']}/redeploy")).status_code == 409
     assert (await admin.patch(f"/api/servers/{shop['id']}", json={"hosted": NOTES["hosted"]})).status_code == 409
+
+
+async def test_two_replicas_starting_together_on_an_empty_database_make_one_admin(pool, monkeypatch):
+    settings = Settings(
+        database_url="unused", encryption_key="k", public_url=BASE,
+        bootstrap_admin_email=ADMIN["email"], bootstrap_admin_password=ADMIN["password"],
+    )
+    await seed.bootstrap_admin(pool, settings)
+
+    # The second replica looked a moment earlier, when there was still nobody,
+    # and now tries to create the same admin. It must give way quietly, not crash.
+    async def nobody_yet(_):
+        return 0
+
+    monkeypatch.setattr(repo, "count_users", nobody_yet)
+    await seed.bootstrap_admin(pool, settings)
+    assert [user.email for user in await repo.list_users(pool)] == [ADMIN["email"]]

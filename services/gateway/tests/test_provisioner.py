@@ -26,7 +26,7 @@ def workload(name: str, ready: bool) -> dict:
     return {
         "metadata": {"name": name, "generation": 1},
         "spec": {"replicas": 1},
-        "status": {"observedGeneration": 1, "readyReplicas": 1 if ready else 0},
+        "status": {"observedGeneration": 1, "replicas": 1, "updatedReplicas": 1, "readyReplicas": 1 if ready else 0},
     }
 
 
@@ -38,6 +38,8 @@ class FakeCluster:
         self.releases: dict[str, str] = {}  # namespace -> helm status
         self.installs: list[tuple[str, dict]] = []
         self.server_installs: list[tuple] = []
+        self.certificate_issued = False
+        self.recorded_warnings: dict[str, str] = {}
         self.bindings: list[tuple[str, str, str]] = []
         self.ready: set[str] = set()  # namespaces whose pods have come up
         self.becomes_ready_after_checks = 2
@@ -71,6 +73,8 @@ class FakeCluster:
         self.bindings.append((namespace, cluster_role, f"{account_namespace}/{account}"))
 
     async def read_secret(self, namespace, name):
+        if name == "store-tls":
+            return {"tls.crt": "certificate"} if self.certificate_issued else None
         return {"mcp-auth-token": f"token-of-{namespace}"} if namespace in self.releases else None
 
     async def workloads(self, namespace):
@@ -94,6 +98,9 @@ class FakeCluster:
             "metadata": {"name": "store-wordpress-abc"},
             "status": {"initContainerStatuses": [{"name": "setup", "state": {"waiting": {"reason": "ImagePullBackOff"}}}]},
         }]
+
+    async def warnings(self, namespace):
+        return self.recorded_warnings
 
     # helm
     async def status(self, namespace, release):
@@ -499,3 +506,47 @@ def test_a_container_kubernetes_refuses_to_start_is_reported_with_the_reason():
     assert waiting_on([refused], pods) == [
         "server-mcp (CreateContainerConfigError: container has runAsNonRoot and image will run as root)"
     ]
+
+
+async def test_with_tls_a_store_is_not_ready_until_its_certificate_has_been_issued(pool, cluster, owner):
+    from dataclasses import replace
+
+    provisioner = Provisioner(pool, CIPHER, cluster, cluster, replace(SETTINGS, url_scheme="https"))
+    store = await new_store(pool, owner)
+    await provisioner.tick()
+    await asyncio.sleep(0.2)
+    # The pods are up, but nothing is registered until the certificate exists.
+    waiting = await repo.get_store(pool, store.id)
+    assert (waiting.status, waiting.detail) == ("provisioning", "Waiting for the store's TLS certificate")
+    assert await repo.list_servers(pool) == []
+
+    cluster.certificate_issued = True
+    await provisioner.idle()
+    ready = await repo.get_store(pool, store.id)
+    assert (ready.status, ready.url) == ("ready", "https://books.shops.test")
+    await provisioner.stop()
+
+
+def test_a_workload_with_no_pod_at_all_is_explained_by_what_kubernetes_recorded_about_it():
+    # A StatefulSet whose volume a quota refused: no pod exists to ask, only an event.
+    database = workload("store-mariadb", False)
+    warnings = {"store-mariadb": "create Claim data-store-mariadb-0 failed: exceeded quota: store-quota"}
+    assert waiting_on([database], [], warnings) == [
+        "store-mariadb (create Claim data-store-mariadb-0 failed: exceeded quota: store-quota)"
+    ]
+    # A pod's own state, when there is one, is the more direct answer.
+    pods = [{"metadata": {"name": "store-mariadb-0"}, "status": {"containerStatuses": [
+        {"name": "mariadb", "state": {"waiting": {"reason": "ImagePullBackOff"}}}]}}]
+    assert waiting_on([database], pods, warnings) == ["store-mariadb (ImagePullBackOff)"]
+
+
+def test_a_changed_workload_is_not_ready_while_a_pod_of_the_old_version_remains():
+    rolling = workload("server-mcp", True)
+    # The new pod is not up yet; the one that is ready is the old version.
+    rolling["status"] |= {"replicas": 2, "updatedReplicas": 1, "readyReplicas": 1}
+    assert waiting_on([rolling], []) == ["server-mcp (starting)"]
+    # New pod ready, old one still being stopped.
+    rolling["status"] |= {"replicas": 2, "updatedReplicas": 1, "readyReplicas": 2}
+    assert waiting_on([rolling], []) == ["server-mcp (starting)"]
+    rolling["status"] |= {"replicas": 1, "updatedReplicas": 1, "readyReplicas": 1}
+    assert waiting_on([rolling], []) == []

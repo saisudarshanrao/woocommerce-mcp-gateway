@@ -6,7 +6,10 @@ brief asks to be documented and defended.
 
 **Status:** every layer is built and verified end to end on the local cluster,
 including the multi-store bonus and the chat agent against the real model
-(`make chat-smoke`). Not done: a deployment to a real VPS.
+(`make chat-smoke`). The production deployment has been rehearsed end to end on
+a separate virtual machine running k3s, with production values and HTTPS
+([DEPLOY.md](DEPLOY.md)); it has not been run on a rented server with a public
+address.
 
 ## 1. Architecture
 
@@ -568,7 +571,7 @@ Beyond the core, from the brief's list of extras:
 | Observability | Prometheus metrics per server, per-server figures in the dashboard, and plain reasons for an unreachable upstream or a failed call (4.9). No Prometheus is deployed in the cluster. |
 | Many tools | Done, see 4.11: `/mcp/search` and the chat's automatic switch. |
 | Upgrades and rollback | Documented in [DEPLOY.md](DEPLOY.md); a rolling update of the API was measured to drop no requests. |
-| VPS deployment | Charts validated with production values. Not run on a real server. |
+| VPS deployment | Rehearsed, not done for real. `scripts/vps-rehearsal.sh` makes a separate Ubuntu VM with k3s installed as on a server; `make up ENV=prod SITE=rehearsal` deploys to it with production values, two gateway replicas and cert-manager certificates; all seven end-to-end checks pass against it over HTTPS and it survives a reboot. What a public server would add (Let's Encrypt, a public node address, another CPU architecture, a registry) is untested. [DEPLOY.md](DEPLOY.md) has the steps and what the rehearsal found. |
 | OAuth on the gateway | Done alongside API keys, see 4.12. Verified with the MCP SDK's client and by hand-rolled steps through the Ingress; not yet tried with Claude Code or Cursor themselves. |
 | Hosted MCP servers (by image) | Done, see 4.13. `make hosted-smoke` walks it end to end. Secret environment values are not supported. |
 
@@ -651,10 +654,28 @@ Confirmed on the first runs against the real model:
   "The model took too long to answer" rather than hanging, as designed.
 * **With only the two search tools the model does search first.** With the
   threshold lowered to 3, it called `find_tools`, then the tool it found.
+* **The better model ran out of free quota mid-test.** `gemini-3.5-flash`
+  stopped answering with HTTP 429 after a few dozen requests in a day. The
+  default is now `gemini-3.5-flash-lite`, whose free quota is far larger. Its
+  answers are plainer, but the tool loop, which is what is graded, works the
+  same. The chat reports the 429 in words rather than failing silently.
 * **Do not edit a Helm-managed object by hand.** A `kubectl set env` on the API
   Deployment made the next `helm upgrade` fail: Helm 4 applies server-side and
   refuses to overwrite a field another tool has set. Change the value in the
   chart instead; `helm upgrade --force-conflicts` takes the field back.
+
+Confirmed by rehearsing the production deployment on a separate VM (the full
+list is in [DEPLOY.md](DEPLOY.md)):
+
+* **Local and production values exercise different code paths.** Two replicas
+  raced to create the first admin; production volume sizes tripped a store's
+  own storage quota; a store was "ready" before its certificate existed. None of
+  these can happen with one replica, 1 Gi volumes and plain HTTP.
+* **Some refusals leave no trace on the object you are watching.** A StatefulSet
+  whose volume a quota refuses has no pod and no failure condition, only an
+  event. The provisioner now reads events too.
+* **"Ready" has to mean the rollout finished**, not that some pod is ready: after
+  a change, the pod that is ready may be the old one.
 
 Still open:
 * **Store email is not delivered.** There is no mail server in the cluster, so
@@ -668,7 +689,7 @@ Still open:
 ## 9. Decisions made
 
 1. **Backend language: Python.**
-2. **LLM for the chat agent: Gemini on the free tier** (`gemini-3.5-flash`),
+2. **LLM for the chat agent: Gemini on the free tier** (`gemini-3.5-flash-lite`),
    reached through its OpenAI-compatible API. Changing provider is three
    settings: base URL, model and key.
 

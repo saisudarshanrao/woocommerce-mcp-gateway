@@ -105,3 +105,16 @@ class Kube:
 
     async def pods(self, namespace: str) -> list[dict]:
         return (await self._request("GET", f"/api/v1/namespaces/{namespace}/pods"))["items"]
+
+    async def warnings(self, namespace: str) -> dict[str, str]:
+        """The latest warning Kubernetes recorded about each object in the namespace, by the object's name.
+
+        Some refusals show up nowhere else. A StatefulSet whose volume is
+        refused by a quota, for example, simply has no pod, and only its
+        events say why.
+        """
+        events = await self._request("GET", f"/api/v1/namespaces/{namespace}/events?fieldSelector=type%3DWarning")
+        latest: dict[str, str] = {}
+        for event in sorted(events["items"], key=lambda e: e.get("lastTimestamp") or e.get("eventTime") or ""):
+            latest[event["involvedObject"]["name"]] = event.get("message", "")
+        return latest

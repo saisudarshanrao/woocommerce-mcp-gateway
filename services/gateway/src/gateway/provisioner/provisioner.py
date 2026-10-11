@@ -59,6 +59,7 @@ class KubeApi(Protocol):
     async def read_secret(self, namespace: str, name: str) -> dict[str, str] | None: ...
     async def workloads(self, namespace: str) -> list[dict]: ...
     async def pods(self, namespace: str) -> list[dict]: ...
+    async def warnings(self, namespace: str) -> dict[str, str]: ...
 
 
 class HelmCli(Protocol):
@@ -97,22 +98,34 @@ class Failed(Exception):
     """Provisioning cannot succeed as things stand. The message is shown to the user."""
 
 
-def waiting_on(workloads: list[dict], pods: list[dict]) -> list[str]:
-    """What is not ready yet, in words. Empty when every workload has all its pods ready."""
+def waiting_on(workloads: list[dict], pods: list[dict], warnings: dict[str, str] | None = None) -> list[str]:
+    """What is not ready yet, in words. Empty when every workload has all its pods ready.
+
+    The reason comes from the workload's own status if it gives one, else from
+    its pod, else from the latest warning Kubernetes recorded about it.
+    """
     waiting = []
     for workload in workloads:
         wanted = workload["spec"].get("replicas", 1)
         status = workload.get("status", {})
-        current = status.get("observedGeneration") == workload["metadata"].get("generation")
-        # updatedReplicas: after a change, pods of the old version do not count.
-        updated = status.get("updatedReplicas", status.get("readyReplicas", 0))
-        if current and status.get("readyReplicas", 0) >= wanted and updated >= wanted:
+        # The same test `kubectl rollout status` applies: Kubernetes has seen
+        # the latest version of the workload, every pod it wants is of that
+        # version and ready, and no pod of an older version is left. Without
+        # the last part a changed server counts as ready while its old pod is
+        # still the one answering.
+        if (
+            status.get("observedGeneration") == workload["metadata"].get("generation")
+            and status.get("updatedReplicas", 0) >= wanted
+            and status.get("readyReplicas", 0) >= wanted
+            and status.get("replicas", 0) == wanted
+        ):
             continue
         name = workload["metadata"]["name"]
         reason = next(
             (c.get("message", "") for c in status.get("conditions", []) if c.get("type") == "ReplicaFailure"), ""
         )
-        waiting.append(f"{name} ({reason or pod_state(name, pods) or 'starting'})")
+        reason = reason or pod_state(name, pods) or (warnings or {}).get(name, "")
+        waiting.append(f"{name} ({reason[:240] or 'starting'})")
     return waiting
 
 
@@ -322,7 +335,10 @@ class Provisioner:
             if not await still_wanted():
                 return False
             workloads = await self._kube.workloads(namespace)
-            waiting = waiting_on(workloads, await self._kube.pods(namespace)) if workloads else ["its pods"]
+            if workloads:
+                waiting = waiting_on(workloads, await self._kube.pods(namespace), await self._kube.warnings(namespace))
+            else:
+                waiting = ["its pods"]
             if not waiting:
                 return True
             doing = "Waiting for " + ", ".join(waiting)
@@ -382,6 +398,17 @@ class Provisioner:
 
         if not await self._wait_until_ready(namespace, still_wanted, check_deadline, say):
             return  # deleted while it was being created
+
+        if settings.url_scheme == "https":
+            # The pods being up is not yet the store being reachable: its
+            # certificate is issued separately, and until it is there a browser
+            # is shown a certificate it does not trust.
+            while not (await self._kube.read_secret(namespace, f"{RELEASE}-tls") or {}).get("tls.crt"):
+                if not await still_wanted():
+                    return
+                check_deadline("Waiting for the store's TLS certificate")
+                await say("Waiting for the store's TLS certificate")
+                await asyncio.sleep(settings.poll_seconds)
 
         await say("Registering the store's tools in the gateway")
         secrets = await self._kube.read_secret(namespace, f"{RELEASE}-secrets") or {}

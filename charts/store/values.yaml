@@ -123,8 +123,11 @@ quota:
     requests.memory: 1Gi
     limits.cpu: "4"
     limits.memory: 3Gi
+    # Storage is capped by count here and by size per volume below
+    # (maxVolumeSize), not by a total: a total would have to be kept in step
+    # with the two volume sizes, and when it was not, the database's volume was
+    # refused and the store never started.
     persistentvolumeclaims: "2"
-    requests.storage: 12Gi
     # A store is reached through the Ingress and has no business opening ports of its own.
     services.loadbalancers: "0"
     services.nodeports: "0"
@@ -138,6 +141,8 @@ quota:
     max:
       cpu: "2"
       memory: 2Gi
+  # The largest any one volume may be. Raise it together with
+  # wordpress.persistence.size or mariadb.persistence.size.
   maxVolumeSize: 10Gi
 
 # DNS suffix of the cluster, used to build the names the MCP server answers to.

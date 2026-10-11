@@ -1,23 +1,27 @@
 # Deploying to a VPS, upgrading and rolling back
 
 The same three charts run on the local cluster and on a server. This page says
-what differs and how to upgrade.
+what differs, how to deploy, and how to upgrade.
 
-**Not yet run on a real VPS.** The production values for every chart render and
-pass the API server's validation (a server-side dry run), and the local cluster
-runs the same k3s version with the same Traefik, storage and network policy
-controller. The steps below are what that implies, not a record of a deployment.
+**How far this has been tested.** The whole deployment below has been run end to
+end against a separate Ubuntu virtual machine with k3s installed the way a
+server would have it, using the production values, two gateway replicas and
+HTTPS certificates issued by cert-manager. Every end-to-end check in the README
+passes against it, including stores created from the dashboard at their own
+HTTPS hostnames, and it survives a reboot with its data. It has **not** been
+run on a rented server with a public address. [The rehearsal](#rehearsing-on-your-own-machine)
+says what that does and does not prove.
 
 ## What changes between local and production
 
-Only values, and where images are pushed.
+Only values, and how images reach the cluster.
 
 | | Local (`values-local.yaml`) | Production (`values-prod.yaml`) |
 |---|---|---|
 | Hostnames | `store.localhost`, `gateway.localhost` | Real DNS names pointing at the server |
 | TLS | none | `ingress.tls.enabled: true`, certificate from cert-manager |
 | URLs the apps believe they have | `http://...` | `https://...`, derived from the same two settings |
-| Image registry | `localhost:5001` (in the cluster) | Your registry, for example `ghcr.io/<you>` |
+| Images | pushed to `localhost:5001`, a registry beside the cluster | pushed to your registry, or copied onto the server over SSH |
 | Volume sizes | 1 Gi | 10 Gi |
 | Gateway API replicas | 1 | 2 |
 | Stores created in the dashboard | at `<slug>.localhost` | at `<slug>.stores.example.com` (`provisioner.hostTemplate`), each with its own certificate |
@@ -28,42 +32,62 @@ Only values, and where images are pushed.
 Storage uses the cluster's default StorageClass in both, which on k3s is
 `local-path`. Set `persistence.storageClass` to use another.
 
+What is particular to one deployment (its hostnames, the admin's email) lives
+outside the charts, in a **site** directory: `deploy/sites/<name>/store.yaml` and
+`gateway.yaml`, applied on top of `values-prod.yaml` when `SITE=<name>` is
+given. [deploy/sites/example](../deploy/sites/example) is the one to copy.
+
 ## First deployment
 
-1. **A server with k3s.**
+1. **A server with k3s.** 4 GB of memory is enough for everything here.
 
    ```bash
-   curl -sfL https://get.k3s.io | sh -
+   curl -sfL https://get.k3s.io | sh -s - --tls-san <the server's address>
    ```
 
    Copy `/etc/rancher/k3s/k3s.yaml` to your machine as a kube context, replacing
-   `127.0.0.1` with the server's address.
+   `127.0.0.1` with the server's address. `--tls-san` is what makes the API's
+   certificate valid for that address.
 
-2. **DNS.** Point two names at the server, for the store and for the gateway.
-   For stores created from the dashboard, also point a wildcard record at it,
-   for example `*.stores.example.com`, and set `provisioner.hostTemplate` to
-   match. Each new store then gets its own certificate from cert-manager. To
-   leave that feature out, set `provisioner.enabled: false`.
+2. **DNS.** Point three names at the server: one for the store, one for the
+   gateway, and a wildcard for stores created from the dashboard, for example
+   `*.stores.example.com`. To leave that feature out, set
+   `provisioner.enabled: false`.
 
-3. **cert-manager**, for TLS. Install it and create a ClusterIssuer named
-   `letsencrypt-prod` that solves HTTP-01 challenges through the `traefik`
-   ingress class. The [cert-manager documentation](https://cert-manager.io/docs/)
-   has both steps.
-
-4. **Edit the three `values-prod.yaml` files**: the hostnames, the admin emails.
-   If the server's own address is public, put it in the gateway chart's
+3. **Your site.** Copy `deploy/sites/example` to `deploy/sites/<name>` and set
+   the hostnames and emails in its two values files and in
+   `cluster-issuer.yaml`. If the server's own address is public, also put it in
    `provisioner.apiServer.cidrs` as a `/32`: on k3s the Kubernetes API listens
    on the node's address, and the provisioner's NetworkPolicy must allow it.
 
-5. **Log in to your registry** (`docker login ghcr.io`), then build, push and
-   deploy everything:
+4. **HTTPS.** Send plain HTTP to HTTPS, install cert-manager, and give it an
+   issuer:
 
    ```bash
-   make up ENV=prod KUBE_CONTEXT=<context> REGISTRY=ghcr.io/<you> PLATFORM=linux/amd64
+   kubectl apply -f deploy/sites/<name>/traefik-https-redirect.yaml
+   kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.21.2/cert-manager.yaml
+   kubectl apply -f deploy/sites/<name>/cluster-issuer.yaml
+   ```
+
+   Each Ingress the charts create names that issuer, and cert-manager obtains
+   and renews its certificate, including one for every store created later.
+
+5. **Deploy.** With a registry (`docker login` first):
+
+   ```bash
+   make up ENV=prod SITE=<name> KUBE_CONTEXT=<context> REGISTRY=ghcr.io/<you> PLATFORM=linux/amd64
+   ```
+
+   Without one, the images can be copied straight onto the server over SSH and
+   loaded into its container runtime. Every image's tag names its exact content
+   and the charts never ask for a fresh pull, so Kubernetes uses what is there:
+
+   ```bash
+   make up ENV=prod SITE=<name> KUBE_CONTEXT=<context> REGISTRY=images.local SHIP_TO=<user>@<server> PLATFORM=linux/amd64
    ```
 
    `PLATFORM` matters when your machine and the server have different CPUs, such
-   as an Apple Silicon Mac and an x86 server. If the registry is private, also
+   as an Apple Silicon Mac and an x86 server. With a private registry, also
    create an image pull secret in each namespace and name it under
    `imagePullSecrets`.
 
@@ -79,6 +103,56 @@ the server too:
 ```bash
 make smoke KUBE_CONTEXT=<context> STORE_URL=https://store.example.com GATEWAY_URL=https://gateway.example.com
 ```
+
+## Rehearsing on your own machine
+
+```bash
+scripts/vps-rehearsal.sh
+```
+
+creates a fresh Ubuntu virtual machine with Lima, installs k3s on it with the
+official installer, applies step 4 above, writes a site called `rehearsal`, and
+prints the two `make` commands to deploy to it and check it. `scripts/vps-rehearsal.sh down`
+removes it all. Your own `~/.kube/config` is not touched: the VM's kubeconfig is
+a separate file.
+
+The VM's address is private, which forces two substitutions. Its hostnames are
+`<name>.<address>.sslip.io`, a public DNS service that answers with the address
+written in the name. And its certificates come from a certificate authority
+cert-manager is given on the spot, because Let's Encrypt can only vouch for
+names it can reach from the internet; the checks trust that authority through
+`SSL_CERT_FILE`. Everything else is what a server gets: the same charts and
+production values, HTTPS on every hostname, two gateway replicas, images
+copied over SSH.
+
+**What it proved**, when run for this project: all seven checks (store, MCP
+server, gateway, isolation, stores, hosted servers, chat) pass over HTTPS; a
+store created from the dashboard gets its own hostname and certificate without
+any manual step; plain HTTP is redirected; and after the VM is stopped and
+started again everything comes back with its data in about fifteen seconds.
+
+**What it found**, none of which showed on the local cluster:
+
+* With two gateway replicas starting at once on an empty database, both tried
+  to create the first admin, and the loser crashed and restarted.
+* With production volume sizes, a created store's own storage quota refused its
+  database volume, so the store never started, and the dashboard only said it
+  was waiting. The quota no longer carries a total that has to be kept in step
+  with the sizes, and the provisioner now reports refusals that Kubernetes
+  records only as events.
+* A store was reported ready as soon as its pods were, a few seconds before its
+  certificate existed. It now waits for the certificate.
+* A hosted server was reported redeployed while its old pod was still the one
+  answering. Readiness now means the rollout has finished.
+* Without a redirect the dashboard also answered on `http://`, where signing in
+  cannot work because the session cookie is marked Secure.
+* The store's scheduled job failed once on first install, having run while
+  WordPress was still being set up. It retries for longer now.
+
+**What it does not prove.** Nothing here has faced the internet: not Let's
+Encrypt's HTTP-01 check, not a public address on the node (see step 3), not a
+server with a different CPU from the machine that built the images, and not a
+registry. Those are the things to watch on a first real deployment.
 
 ## Upgrading
 

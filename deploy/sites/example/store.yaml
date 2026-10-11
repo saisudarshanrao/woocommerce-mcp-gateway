@@ -1,0 +1,8 @@
+# One deployment's settings for the store chart, applied on top of
+# charts/store/values-prod.yaml by `make ... ENV=prod SITE=<this directory's name>`.
+# Copy this directory, rename it, and change the values.
+
+store:
+  host: store.example.com
+  title: My Store
+  adminEmail: you@example.com

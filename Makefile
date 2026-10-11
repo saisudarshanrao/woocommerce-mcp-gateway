@@ -13,6 +13,16 @@ export PLATFORM
 
 # Which values file to layer on each chart: values-$(ENV).yaml.
 ENV ?= local
+# One deployment's own settings (hostnames, email, certificate issuer), kept
+# apart from the charts: deploy/sites/$(SITE)/<chart>.yaml, applied last. See
+# deploy/sites/example.
+SITE ?=
+site_values = $(if $(SITE),$(if $(wildcard deploy/sites/$(SITE)/$(1).yaml),--values deploy/sites/$(SITE)/$(1).yaml,),)
+# For a server with no registry to pull from: an SSH destination (user@host).
+# Images are then copied onto that server instead of being pushed. See
+# scripts/build-image.sh.
+SHIP_TO ?=
+export SHIP_TO
 # Public addresses, for the smoke tests. They must match the charts' hosts.
 STORE_URL   ?= http://store.localhost
 GATEWAY_URL ?= http://gateway.localhost
@@ -80,7 +90,7 @@ store-image: ## Build the store's images (WordPress, MCP server) and push them t
 store-up: store-image ## Install or upgrade the store, then wait until it is ready
 	$(HELM) upgrade --install $(STORE_RELEASE) charts/store \
 		--namespace $(STORE_NAMESPACE) --create-namespace \
-		--values charts/store/values-$(ENV).yaml \
+		--values charts/store/values-$(ENV).yaml $(call site_values,store) \
 		--set wordpress.image.registry=$(REGISTRY) --set wordpress.image.tag=$(WORDPRESS_TAG) \
 		--set wooMcp.image.registry=$(REGISTRY) --set wooMcp.image.tag=$(WOO_MCP_TAG) \
 		--wait --timeout 10m
@@ -120,7 +130,7 @@ mcp-servers-up: ## Deploy the two extra MCP servers (tasks and sandbox)
 		$(HELM) upgrade --install $$server charts/mcp-server \
 			--namespace $(MCP_NAMESPACE) --create-namespace \
 			--values charts/mcp-server/values-$$server.yaml \
-			--values charts/mcp-server/values-$(ENV).yaml \
+			--values charts/mcp-server/values-$(ENV).yaml $(call site_values,mcp-server) \
 			--set image.registry=$(REGISTRY) --set image.tag=$(DEMO_MCP_TAG) \
 			--wait --timeout 5m | grep -E "^(STATUS|REVISION)" | tr '\n' ' '; echo "($$server)"; \
 	done
@@ -142,7 +152,7 @@ gateway-image: ## Build the gateway's images (API, provisioner, dashboard) and p
 gateway-up: gateway-image store-image ## Install or upgrade the gateway, then wait until it is ready
 	$(HELM) upgrade --install $(GATEWAY_RELEASE) charts/gateway \
 		--namespace $(GATEWAY_NAMESPACE) --create-namespace \
-		--values charts/gateway/values-$(ENV).yaml \
+		--values charts/gateway/values-$(ENV).yaml $(call site_values,gateway) \
 		--set api.image.registry=$(REGISTRY) --set api.image.tag=$(GATEWAY_TAG) \
 		--set dashboard.image.registry=$(REGISTRY) --set dashboard.image.tag=$(DASHBOARD_TAG) \
 		--set provisioner.image.registry=$(REGISTRY) --set provisioner.image.tag=$(PROVISIONER_TAG) \

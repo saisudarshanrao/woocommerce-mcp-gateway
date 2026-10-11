@@ -21,13 +21,18 @@ async def bootstrap_admin(pool: asyncpg.Pool, settings: Settings) -> None:
         return
     if await repo.count_users(pool) > 0:
         return
-    await repo.create_user(
-        pool,
-        settings.bootstrap_admin_email,
-        "Administrator",
-        "admin",
-        security.hash_password(settings.bootstrap_admin_password),
-    )
+    try:
+        await repo.create_user(
+            pool,
+            settings.bootstrap_admin_email,
+            "Administrator",
+            "admin",
+            security.hash_password(settings.bootstrap_admin_password),
+        )
+    except asyncpg.UniqueViolationError:
+        # Another replica, started at the same moment on the same empty
+        # database, got there first. That is the outcome wanted.
+        return
     logger.info("created the first admin, %s", settings.bootstrap_admin_email)
 
 

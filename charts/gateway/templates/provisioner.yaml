@@ -77,8 +77,9 @@ rules:
   - apiGroups: [networking.k8s.io]
     resources: [ingresses, networkpolicies]
     verbs: [get, list, watch, create, update, patch, delete]
+  # Read-only, to report progress and the reason when something will not start.
   - apiGroups: [""]
-    resources: [pods]
+    resources: [pods, events]
     verbs: [get, list]
 ---
 # RBAC cannot say "only in namespaces you created": the rules above would let

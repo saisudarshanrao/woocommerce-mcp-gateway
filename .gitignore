@@ -27,3 +27,6 @@ dist/
 # Helm
 charts/*/charts/
 *.tgz
+
+# Written per machine by scripts/vps-rehearsal.sh
+deploy/sites/rehearsal/

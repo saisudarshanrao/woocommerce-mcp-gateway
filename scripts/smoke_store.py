@@ -17,10 +17,31 @@ Standard library only, so it runs on any Python 3.9+.
 
 import argparse
 import json
+import os
+import ssl
 import subprocess
 import sys
 import urllib.error
 import urllib.request
+
+
+def https_handler():
+    """How these scripts decide which HTTPS certificates to trust.
+
+    The system's certificate authorities, plus the one in the file named by
+    SSL_CERT_FILE if that is set. A deployment whose certificates come from a
+    private authority (the rehearsal in scripts/vps-rehearsal.sh, or a company's
+    own) needs the second. The variable is the usual one, but Python on macOS
+    does not act on it by itself.
+    """
+    context = ssl.create_default_context()
+    if os.environ.get("SSL_CERT_FILE"):
+        context.load_verify_locations(cafile=os.environ["SSL_CERT_FILE"])
+    return urllib.request.HTTPSHandler(context=context)
+
+
+# Every plain urlopen() in the smoke tests goes through this.
+urllib.request.install_opener(urllib.request.build_opener(https_handler()))
 
 SHOPPER = {
     "first_name": "Smoke",

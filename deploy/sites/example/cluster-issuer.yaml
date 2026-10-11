@@ -1,0 +1,21 @@
+# The certificate issuer the charts' production values name. Apply it once,
+# after installing cert-manager:  kubectl apply -f cluster-issuer.yaml
+#
+# Let's Encrypt proves you control each hostname by fetching a file from it
+# over plain HTTP (the "HTTP-01" challenge), which cert-manager serves through
+# Traefik. So the names must already resolve to this server, and port 80 must
+# be reachable from the internet.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: you@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik

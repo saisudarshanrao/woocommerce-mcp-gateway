@@ -227,16 +227,18 @@ spec:
               # The retries are not optional. A NetworkPolicy allows this pod
               # by its labels, but the rule only learns a new pod's IP a moment
               # after the pod starts, and curl connects within milliseconds.
-              # Until then the connection is refused.
+              # Until then the connection is refused. It is refused for
+              # longer on a store's very first start, while WordPress is still
+              # being installed, so the retries go on for a minute and a half.
               command:
                 - curl
                 - --fail
                 - --silent
                 - --show-error
                 - --retry
-                - "5"
+                - "30"
                 - --retry-delay
-                - "2"
+                - "3"
                 - --retry-connrefused
                 - --max-time
                 - "200"

@@ -1,0 +1,17 @@
+# One deployment's settings for the gateway chart, applied on top of
+# charts/gateway/values-prod.yaml.
+
+host: gateway.example.com
+
+admin:
+  email: you@example.com
+
+provisioner:
+  # Stores created from the dashboard appear here. Needs a wildcard DNS record,
+  # *.stores.example.com, pointing at the server.
+  hostTemplate: "{slug}.stores.example.com"
+  # On k3s the Kubernetes API listens on the server's own address. If that
+  # address is public, name it here so the provisioner's NetworkPolicy lets it
+  # through; the default only covers private addresses.
+  # apiServer:
+  #   cidrs: ["203.0.113.10/32"]

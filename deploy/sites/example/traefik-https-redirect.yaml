@@ -1,0 +1,23 @@
+# Sends every plain-HTTP request to HTTPS, for the whole server. Apply it once:
+#   kubectl apply -f traefik-https-redirect.yaml
+#
+# k3s installs Traefik from a Helm chart of its own, and this object is how k3s
+# lets you change that chart's values: it re-renders Traefik with these added.
+# Without it the dashboard would also answer on http://, where a browser will
+# not send the session cookie (it is marked Secure) and signing in cannot work.
+# Let's Encrypt's HTTP-01 check still passes: it follows the redirect.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    ports:
+      web:
+        http:
+          redirections:
+            entryPoint:
+              to: websecure
+              scheme: https
+              permanent: true
