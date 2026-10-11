@@ -33,6 +33,9 @@ FROM python:3.14-slim AS provisioner
 COPY --from=alpine/helm:4.3.0 /usr/bin/helm /usr/local/bin/helm
 COPY --from=store-chart . /charts/store
 COPY --from=server-chart . /charts/mcp-server
+# The charts are read at run time by an unprivileged user. Their permissions
+# are set here so they do not depend on the checkout they were copied from.
+RUN chmod -R a+rX /charts
 COPY --from=build /app/.venv /app/.venv
 # The root filesystem is read-only at run time; helm keeps its files in /tmp.
 ENV PATH="/app/.venv/bin:$PATH" \

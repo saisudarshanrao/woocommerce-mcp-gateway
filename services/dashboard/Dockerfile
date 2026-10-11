@@ -13,6 +13,8 @@ RUN npm run build
 
 
 FROM nginxinc/nginx-unprivileged:1.29-alpine
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Readable by nginx's unprivileged user whatever the file's permissions were
+# in the checkout it was built from.
+COPY --chmod=0644 nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 8080

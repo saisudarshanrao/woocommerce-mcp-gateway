@@ -53,7 +53,14 @@ COPY --chown=www-data:www-data wp-config.php /usr/src/wordpress/wp-config.php
 COPY setup/ /usr/local/share/store-setup/
 COPY --chmod=0755 bin/store-setup /usr/local/bin/store-setup
 
-RUN a2enconf store
+# Copied files keep whatever permissions they had in the checkout, and those
+# depend on the umask of whoever cloned the repository. With a strict one the
+# files arrive readable by root only, and Apache, which runs as www-data,
+# cannot open its own configuration. So readability is set here, not inherited.
+RUN chmod -R a+rX /etc/apache2/ports.conf /etc/apache2/sites-available/000-default.conf \
+      /etc/apache2/conf-available/store.conf /usr/local/etc/php/conf.d/zz-store.ini \
+      /usr/src/wordpress/wp-config.php /usr/local/share/store-setup \
+    && a2enconf store
 
 USER www-data
 EXPOSE 8080
