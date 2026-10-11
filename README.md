@@ -88,7 +88,9 @@ make up
 ```
 
 `make up` builds six images, pushes them to the cluster's own registry and
-installs the three charts. The first run takes a few minutes. The whole system
+installs the three charts. The first run takes a few minutes, most of it
+downloading base images; from a fresh clone with those already present it was
+measured at about three and a half minutes for both commands. The whole system
 uses about 2 GB of memory.
 
 | URL | What | Sign in |

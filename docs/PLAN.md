@@ -683,6 +683,20 @@ list is in [DEPLOY.md](DEPLOY.md)):
   let through to it. Pods now have to stay ready for five seconds before they
   count, and the provisioner waits for that.
 
+Confirmed by bringing everything up from a fresh clone on a new cluster:
+
+* **It works from nothing.** With the cluster deleted, a fresh clone of the
+  public repository, `make cluster-up` and `make up` with the images rebuilt
+  without the build cache: everything running in about three and a half
+  minutes with no restarts, and all seven end-to-end checks pass.
+* **An image inherits the permissions of the checkout it is built from.** The
+  first attempt used a clone made with a strict umask, and WordPress
+  crash-looped: copied files arrived readable by root only, and Apache runs as
+  another user. The same would have stopped the dashboard's nginx and the
+  provisioner's charts. Git records only whether a file is executable; the
+  rest comes from the umask of whoever clones. Each Dockerfile now sets the
+  permissions it needs, and the test was repeated from a strict clone.
+
 Still open:
 * **Store email is not delivered.** There is no mail server in the cluster, so
   WooCommerce's order emails fail quietly. Orders are unaffected.
