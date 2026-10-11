@@ -114,6 +114,8 @@ spec:
               value: {{ .Values.api.probeIntervalSeconds | quote }}
             - name: LLM_BASE_URL
               value: {{ .Values.llm.baseUrl | quote }}
+            - name: CHAT_REQUESTS_PER_MINUTE
+              value: {{ .Values.llm.requestsPerMinute | quote }}
             - name: CHAT_TOOL_SEARCH_ABOVE
               value: {{ .Values.llm.toolSearchAbove | quote }}
             - name: LLM_MODEL

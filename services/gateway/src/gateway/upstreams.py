@@ -40,6 +40,10 @@ from gateway.urlguard import BlockedAddress, GuardedTransport, UrlGuard
 logger = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT_SECONDS = 5.0
+# A tool's description is written by its server and read by every user's model.
+# The gateway cannot tell an honest description from one written to steer the
+# model, but it can at least bound how much any one server gets to say.
+MAX_DESCRIPTION_LENGTH = 1024
 
 HttpClientFactory = Callable[[Server, dict[str, str], float], httpx2.AsyncClient]
 
@@ -93,6 +97,25 @@ def guarded_http_client(guard: UrlGuard) -> HttpClientFactory:
         )
 
     return build
+
+
+def expose(server: Server, tool: types.Tool) -> ExposedTool:
+    """A server's tool as the gateway presents it to clients and models."""
+    description = tool.description or ""
+    if len(description) > MAX_DESCRIPTION_LENGTH:
+        description = description[:MAX_DESCRIPTION_LENGTH].rstrip() + " […]"
+    exposed = tool.model_copy(
+        update={
+            "name": naming.exposed_name(server.slug, tool.name),
+            # Lead with the server's name. A model can then tell apart two
+            # servers' tools that do similar things, and whatever the
+            # description goes on to claim, where it comes from is stated first
+            # and by the gateway, not by the server.
+            "description": f"[{server.name}] {description}".strip(),
+        }
+    )
+    read_only = bool(tool.annotations and tool.annotations.read_only_hint)
+    return ExposedTool(upstream_name=tool.name, tool=exposed, read_only=read_only)
 
 
 def _leaves(error: BaseException) -> list[BaseException]:
@@ -293,16 +316,7 @@ class UpstreamManager:
             if reason:
                 skipped.append({"name": tool.name, "reason": reason})
                 continue
-            exposed = tool.model_copy(
-                update={
-                    "name": naming.exposed_name(server.slug, tool.name),
-                    # Lead with the server's name so a model can tell apart two
-                    # servers' tools that do similar things.
-                    "description": f"[{server.name}] {tool.description or ''}".strip(),
-                }
-            )
-            read_only = bool(tool.annotations and tool.annotations.read_only_hint)
-            tools[tool.name] = ExposedTool(upstream_name=tool.name, tool=exposed, read_only=read_only)
+            tools[tool.name] = expose(server, tool)
 
         if state.status != "connected":
             logger.info("upstream %s is connected (%d tools, protocol %s)", server.slug, len(tools), protocol)

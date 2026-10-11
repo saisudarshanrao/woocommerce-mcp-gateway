@@ -26,7 +26,7 @@ def workload(name: str, ready: bool) -> dict:
     return {
         "metadata": {"name": name, "generation": 1},
         "spec": {"replicas": 1},
-        "status": {"observedGeneration": 1, "replicas": 1, "updatedReplicas": 1, "readyReplicas": 1 if ready else 0},
+        "status": {"observedGeneration": 1, "replicas": 1, "updatedReplicas": 1, "availableReplicas": 1 if ready else 0},
     }
 
 
@@ -542,11 +542,18 @@ def test_a_workload_with_no_pod_at_all_is_explained_by_what_kubernetes_recorded_
 
 def test_a_changed_workload_is_not_ready_while_a_pod_of_the_old_version_remains():
     rolling = workload("server-mcp", True)
-    # The new pod is not up yet; the one that is ready is the old version.
-    rolling["status"] |= {"replicas": 2, "updatedReplicas": 1, "readyReplicas": 1}
+    # The new pod is not up yet; the one that is available is the old version.
+    rolling["status"] |= {"replicas": 2, "updatedReplicas": 1, "availableReplicas": 1}
     assert waiting_on([rolling], []) == ["server-mcp (starting)"]
-    # New pod ready, old one still being stopped.
-    rolling["status"] |= {"replicas": 2, "updatedReplicas": 1, "readyReplicas": 2}
+    # New pod available, old one still being stopped.
+    rolling["status"] |= {"replicas": 2, "updatedReplicas": 1, "availableReplicas": 2}
     assert waiting_on([rolling], []) == ["server-mcp (starting)"]
-    rolling["status"] |= {"replicas": 1, "updatedReplicas": 1, "readyReplicas": 1}
+    rolling["status"] |= {"replicas": 1, "updatedReplicas": 1, "availableReplicas": 1}
     assert waiting_on([rolling], []) == []
+
+
+def test_a_pod_that_has_only_just_become_ready_does_not_count_yet():
+    fresh = workload("store-wordpress", False)
+    # Ready, but not for long enough to be called available.
+    fresh["status"] |= {"readyReplicas": 1, "availableReplicas": 0}
+    assert waiting_on([fresh], []) == ["store-wordpress (starting)"]

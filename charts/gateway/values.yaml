@@ -78,6 +78,9 @@ llm:
   model: gemini-3.5-flash-lite
   secretName: gateway-llm
   secretKey: api-key
+  # Chat messages one person may send per minute. The key above is shared by
+  # the whole team, so this keeps one member from using up everyone's quota.
+  requestsPerMinute: 20
   # With more tools than this the chat gives the model two tools, one to find
   # a tool and one to call it, instead of every tool's definition.
   toolSearchAbove: 40

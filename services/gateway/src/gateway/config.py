@@ -45,6 +45,10 @@ class Settings:
     probe_timeout_seconds: float = 5.0
     session_ttl_hours: int = 12
     invite_ttl_hours: int = 72
+    # Chat messages one person may send per minute. The model's API key is
+    # shared by the whole team, so this is what stops one member from using up
+    # everybody's quota. 0 is no limit.
+    chat_requests_per_minute: int = 20
     # With more tools than this, the chat gives the model find_tools and
     # call_tool instead of every tool's definition. See toolsearch.py.
     chat_tool_search_above: int = 40
@@ -98,6 +102,7 @@ class Settings:
             probe_timeout_seconds=float(env.get("PROBE_TIMEOUT_SECONDS", "5")),
             session_ttl_hours=int(env.get("SESSION_TTL_HOURS", "12")),
             invite_ttl_hours=int(env.get("INVITE_TTL_HOURS", "72")),
+            chat_requests_per_minute=int(env.get("CHAT_REQUESTS_PER_MINUTE", "20")),
             chat_tool_search_above=int(env.get("CHAT_TOOL_SEARCH_ABOVE", "40")),
             llm_base_url=env.get("LLM_BASE_URL", "").strip().rstrip("/"),
             llm_model=env.get("LLM_MODEL", "").strip(),

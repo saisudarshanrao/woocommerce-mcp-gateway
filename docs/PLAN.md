@@ -1,7 +1,9 @@
 # Plan: WooCommerce hosting with a team MCP gateway
 
 The spec is [ASSIGNMENT.md](ASSIGNMENT.md). This file records what gets built, in
-what order, and why each choice was made. Section 4 covers the mechanisms the
+what order, and why each choice was made. Two short notes summarise it:
+[DESIGN.md](DESIGN.md) for the design and its tradeoffs, and
+[THREAT-MODEL.md](THREAT-MODEL.md) for what is and is not defended. Section 4 covers the mechanisms the
 brief asks to be documented and defended.
 
 **Status:** every layer is built and verified end to end on the local cluster,
@@ -676,6 +678,10 @@ list is in [DEPLOY.md](DEPLOY.md)):
   event. The provisioner now reads events too.
 * **"Ready" has to mean the rollout finished**, not that some pod is ready: after
   a change, the pod that is ready may be the old one.
+* **And ready is not yet reachable.** Once in many runs, a store's page answered
+  503 in the first second after its pod turned ready, before Traefik was being
+  let through to it. Pods now have to stay ready for five seconds before they
+  count, and the provisioner waits for that.
 
 Still open:
 * **Store email is not delivered.** There is no mail server in the cluster, so

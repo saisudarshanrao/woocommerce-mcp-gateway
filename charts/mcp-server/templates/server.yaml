@@ -37,6 +37,11 @@ metadata:
     {{- include "mcp-server.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  # A pod counts as available only after being ready for this long. The
+  # NetworkPolicy rules that let callers in learn a new pod's address a moment
+  # after it starts; without the pause, "the rollout is finished" could come
+  # before the first caller is actually let through.
+  minReadySeconds: 5
   selector:
     matchLabels:
       {{- include "mcp-server.selectorLabels" . | nindent 6 }}

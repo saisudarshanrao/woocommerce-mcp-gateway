@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from gateway import repo
 from gateway.api.deps import current_user, parts
 from gateway.chat.agent import run_chat
 from gateway.core import Principal
@@ -36,6 +37,9 @@ async def chat(body: ChatRequest, request: Request, user: User = Depends(current
         raise HTTPException(503, "The chat has no model configured. An admin needs to add the model's API key.")
     if body.messages[-1].role != "user":
         raise HTTPException(422, "The last message must be the user's.")
+    limit = app.settings.chat_requests_per_minute
+    if limit and await repo.count_call(app.pool, f"chat:{user.id}") > limit:
+        raise HTTPException(429, f"You have sent {limit} messages in the last minute, which is the limit. Wait a moment.")
 
     # The agent acts as whoever is signed in: same tools, same rules, and its
     # calls are audited under this user with the source "chat".

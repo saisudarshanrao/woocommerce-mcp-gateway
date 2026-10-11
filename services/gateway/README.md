@@ -160,6 +160,7 @@ Environment variables, set by the [chart](../../charts/gateway).
 | `EXTRA_ALLOWED_HOSTS` | Host names to answer to besides the public one |
 | `PROBE_INTERVAL_SECONDS`, `PROBE_TIMEOUT_SECONDS` | Health checks; defaults 10 and 5 |
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | The chat model. Without a key the chat is off. |
+| `CHAT_REQUESTS_PER_MINUTE` | Chat messages one person may send per minute; default 20, 0 is no limit |
 | `CHAT_TOOL_SEARCH_ABOVE` | With more tools than this the chat uses `find_tools` and `call_tool`; default 40 |
 | `UPSTREAM_INTERNAL_HOSTS`, `UPSTREAM_ALLOW_PUBLIC` | Which addresses a server URL may point at; see below |
 | `RATE_LIMIT_PER_MINUTE` | Tool calls per API key per minute; 0 is no limit |

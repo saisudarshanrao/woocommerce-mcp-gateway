@@ -49,6 +49,11 @@ spec:
   # before the new one starts. An upgrade is a short outage, not a rolling one.
   strategy:
     type: Recreate
+  # A pod counts as available only after being ready for this long. The
+  # NetworkPolicy rules that let callers in learn a new pod's address a moment
+  # after it starts; without the pause, "the rollout is finished" could come
+  # before the first caller is actually let through.
+  minReadySeconds: 5
   selector:
     matchLabels:
       {{- include "store.selectorLabels" . | nindent 6 }}

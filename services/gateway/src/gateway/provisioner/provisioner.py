@@ -110,13 +110,14 @@ def waiting_on(workloads: list[dict], pods: list[dict], warnings: dict[str, str]
         status = workload.get("status", {})
         # The same test `kubectl rollout status` applies: Kubernetes has seen
         # the latest version of the workload, every pod it wants is of that
-        # version and ready, and no pod of an older version is left. Without
-        # the last part a changed server counts as ready while its old pod is
-        # still the one answering.
+        # version and available, and no pod of an older version is left.
+        # "Available" is ready for the settling period the charts ask for, not
+        # just ready this instant. Without the last part a changed server
+        # counts as done while its old pod is still the one answering.
         if (
             status.get("observedGeneration") == workload["metadata"].get("generation")
             and status.get("updatedReplicas", 0) >= wanted
-            and status.get("readyReplicas", 0) >= wanted
+            and status.get("availableReplicas", 0) >= wanted
             and status.get("replicas", 0) == wanted
         ):
             continue
