@@ -96,6 +96,12 @@ spec:
               value: {{ join "," .Values.upstreams.internalHosts | quote }}
             - name: UPSTREAM_ALLOW_PUBLIC
               value: {{ .Values.upstreams.allowPublic | quote }}
+            - name: HOSTED_ENABLED
+              value: {{ and .Values.provisioner.enabled .Values.provisioner.hostedServers.enabled | quote }}
+            - name: HOSTED_IMAGE_PREFIXES
+              value: {{ join "," .Values.provisioner.hostedServers.allowedImagePrefixes | quote }}
+            - name: CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | quote }}
             - name: STORES_ENABLED
               value: {{ .Values.provisioner.enabled | quote }}
             - name: MAX_STORES_PER_USER

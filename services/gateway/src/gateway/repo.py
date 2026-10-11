@@ -66,6 +66,11 @@ class Server:
     updated_at: datetime
     # Set when the server belongs to a store created from the dashboard.
     store_id: UUID | None = None
+    # Set for a server the platform runs from a container image. See hosted.py.
+    hosted: str | None = None
+    hosted_status: str | None = None
+    hosted_detail: str | None = None
+    hosted_started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -116,7 +121,7 @@ def _to(cls, row: asyncpg.Record | None):
 USER_COLUMNS = "id, email, name, role, active, created_at"
 SERVER_COLUMNS = (
     "id, slug, name, url, auth_type, auth_header, auth_secret, enabled, timeout_seconds, member_access, "
-    "created_at, updated_at, store_id"
+    "created_at, updated_at, store_id, hosted, hosted_status, hosted_detail, hosted_started_at"
 )
 
 # --- users -------------------------------------------------------------------
@@ -318,13 +323,19 @@ async def get_server_by_slug(pool: asyncpg.Pool, slug: str) -> Server | None:
 
 
 async def create_server(pool: asyncpg.Pool, *, created_by: UUID | None, **values: Any) -> Server:
+    """Registers a server. With `hosted` (what to run, as JSON) it starts out waiting to be deployed."""
     row = await pool.fetchrow(
         "INSERT INTO upstream_servers "
-        "(slug, name, url, auth_type, auth_header, auth_secret, enabled, timeout_seconds, member_access, created_by) "
-        f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING {SERVER_COLUMNS}",
+        "(slug, name, url, auth_type, auth_header, auth_secret, enabled, timeout_seconds, member_access, created_by, "
+        "hosted, hosted_status, hosted_detail, hosted_started_at) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, "
+        "CASE WHEN $11::text IS NULL THEN NULL ELSE 'deploying' END, "
+        "CASE WHEN $11::text IS NULL THEN NULL ELSE 'Waiting for the provisioner' END, "
+        "CASE WHEN $11::text IS NULL THEN NULL ELSE now() END) "
+        f"RETURNING {SERVER_COLUMNS}",
         values["slug"], values["name"], values["url"], values["auth_type"], values.get("auth_header"),
         values.get("auth_secret"), values.get("enabled", True), values.get("timeout_seconds", 30),
-        values.get("member_access", "all"), created_by,
+        values.get("member_access", "all"), created_by, values.get("hosted"),
     )
     return _to(Server, row)
 
@@ -548,3 +559,60 @@ async def register_store_server(pool: asyncpg.Pool, store: Store, *, url: str, a
         store.server_slug, f"{store.name} store", url, auth_secret, store.id,
     )
     return result is not None
+
+
+# --- hosted servers --------------------------------------------------------------
+
+
+async def list_hosted_work(pool: asyncpg.Pool) -> list[Server]:
+    """Hosted servers the provisioner has something to do for."""
+    rows = await pool.fetch(
+        f"SELECT {SERVER_COLUMNS} FROM upstream_servers WHERE hosted_status IN ('deploying', 'deleting') ORDER BY created_at"
+    )
+    return [_to(Server, row) for row in rows]
+
+
+async def set_hosted_detail(pool: asyncpg.Pool, server_id: UUID, detail: str) -> None:
+    # updated_at is left alone on purpose: it changing is what makes the gateway
+    # forget what it knew about a server and check it afresh.
+    await pool.execute(
+        "UPDATE upstream_servers SET hosted_detail = $2 "
+        "WHERE id = $1 AND hosted_status IN ('deploying', 'deleting') AND hosted_detail IS DISTINCT FROM $2",
+        server_id, detail[:500],
+    )
+
+
+async def finish_hosted(pool: asyncpg.Pool, server_id: UUID, status: str, detail: str | None) -> bool:
+    """Ends a deployment attempt as 'running' or 'failed'. False if it is no longer being deployed."""
+    result = await pool.execute(
+        "UPDATE upstream_servers SET hosted_status = $2, hosted_detail = $3, updated_at = now() "
+        "WHERE id = $1 AND hosted_status = 'deploying'",
+        server_id, status, detail[:500] if detail else None,
+    )
+    return result == "UPDATE 1"
+
+
+async def redeploy_hosted(pool: asyncpg.Pool, server_id: UUID, hosted: str | None = None, url: str | None = None) -> Server | None:
+    """Queues a hosted server to be deployed again, with a changed spec if one is given."""
+    row = await pool.fetchrow(
+        f"UPDATE upstream_servers SET hosted = COALESCE($2, hosted), url = COALESCE($3, url), "
+        f"hosted_status = 'deploying', hosted_detail = 'Waiting for the provisioner', hosted_started_at = now(), "
+        f"updated_at = now() "
+        f"WHERE id = $1 AND hosted IS NOT NULL AND hosted_status <> 'deleting' RETURNING {SERVER_COLUMNS}",
+        server_id, hosted, url,
+    )
+    return _to(Server, row)
+
+
+async def mark_hosted_deleting(pool: asyncpg.Pool, server_id: UUID) -> Server | None:
+    """Asks for a hosted server to be removed. It is disabled in the same statement, so its tools go at once."""
+    row = await pool.fetchrow(
+        f"UPDATE upstream_servers SET hosted_status = 'deleting', hosted_detail = 'Waiting for the provisioner', "
+        f"enabled = false, updated_at = now() WHERE id = $1 AND hosted IS NOT NULL RETURNING {SERVER_COLUMNS}",
+        server_id,
+    )
+    return _to(Server, row)
+
+
+async def delete_hosted(pool: asyncpg.Pool, server_id: UUID) -> None:
+    await pool.execute("DELETE FROM upstream_servers WHERE id = $1 AND hosted_status = 'deleting'", server_id)

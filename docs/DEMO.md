@@ -168,6 +168,13 @@ refused.
 * **Tool permissions.** Edit a server and set "members may use" to read-only.
   *A member's client lists only its read-only tools; calling another is refused
   and audited as denied.*
+* **A server from an image.** As the admin, **Servers**, *Add server*, choose
+  *Run it here from a container image*. Identifier `notes`, image as printed by
+  `kubectl -n mcp-servers get deploy tasks-mcp -o jsonpath='{.spec.template.spec.containers[0].image}'`,
+  arguments `tasks`. *The card shows Deploying with what it is waiting for, then
+  Connected with four `notes__` tools about ten seconds later.*
+  `kubectl -n mcp-notes get pods,secret,networkpolicy` shows what was created.
+  Remove it: *its tools go at once, the namespace a few seconds later.*
 * **Sign in with the browser.** Add the gateway to Claude Code with no key:
   `claude mcp add --transport http gateway-oauth http://gateway.localhost/mcp`,
   then run `/mcp` and choose it. *A browser opens on the dashboard's "Allow

@@ -31,8 +31,9 @@ store chart into a new namespace `store-<slug>` and registers the store's MCP
 server automatically. The other extras that are in: per-server tool permissions,
 a guard against server-side request forgery, rate limits per key, Prometheus
 metrics, a two-tool "find, then call" endpoint for when there are too many
-tools to list, and signing in from an MCP client with a browser (OAuth) as an
-alternative to pasting an API key. [docs/PLAN.md](docs/PLAN.md) section 7 says what is and is not
+tools to list, signing in from an MCP client with a browser (OAuth) as an
+alternative to pasting an API key, and MCP servers the platform runs itself
+from a container image an admin names. [docs/PLAN.md](docs/PLAN.md) section 7 says what is and is not
 done.
 
 ## Documentation
@@ -113,7 +114,7 @@ everything else works and the chat page says it is switched off.
 make smoke
 ```
 
-runs five end-to-end checks against the cluster:
+runs six end-to-end checks against the cluster:
 
 | Target | What it proves |
 |---|---|
@@ -122,6 +123,7 @@ runs five end-to-end checks against the cluster:
 | `make gateway-smoke` | The two-user flow: add servers, invite a member, use every server with one key, timeouts, a dead server, disable, revoke, audit log |
 | `make isolation-smoke` | Which connections between namespaces open and which are refused |
 | `make stores-smoke` | Two stores created at once from the dashboard's API, with the provisioner killed midway; their orders compared through the gateway; one store unable to reach the other; what the provisioner may do in the cluster; a store deleted, tools and volumes gone |
+| `make hosted-smoke` | A server added by container image: deployed into its own namespace with a Secret, limits and NetworkPolicy; used through the gateway; unreachable by anything else; changed; removed |
 
 ```bash
 make chat-smoke
@@ -157,6 +159,7 @@ Production uses real DNS names and TLS, set in each chart's `values-prod.yaml`.
 |---|---|---|
 | `store-main` | [charts/store](charts/store) | WordPress + WooCommerce, MariaDB, the store's MCP server, a cron job |
 | `gateway` | [charts/gateway](charts/gateway) | The gateway API, the dashboard, Postgres, the store provisioner |
+| `mcp-<slug>` | [charts/mcp-server](charts/mcp-server), installed by the provisioner | One per MCP server an admin adds by container image |
 | `store-<slug>` | [charts/store](charts/store), installed by the provisioner | One per store created in the dashboard: the same workloads as `store-main`, plus a ResourceQuota and LimitRange |
 | `mcp-servers` | [charts/mcp-server](charts/mcp-server), installed twice | A task-list server and a sandbox server |
 

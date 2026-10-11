@@ -13,6 +13,9 @@ image:
   registry: ""
   repository: demo-mcp
   tag: "0.1.0"
+  # A complete image reference, used as it is instead of the three parts above.
+  # The gateway sets this for a server an admin adds by image.
+  reference: ""
   pullPolicy: IfNotPresent
 
 # Arguments for the container. The demo image takes the server's name here.
@@ -21,7 +24,9 @@ args: []
 env: {}
 
 # The port the server listens on, the path of its MCP endpoint (only used to
-# print the URL after install) and the path Kubernetes probes.
+# print the URL after install) and the path Kubernetes probes. With an empty
+# healthPath Kubernetes only checks that the port accepts a connection, which
+# works for any image.
 port: 8080
 mcpPath: /mcp
 healthPath: /healthz
@@ -35,6 +40,11 @@ auth:
   header: Authorization
   # Use this Secret (key "token") instead of generating one.
   existingSecret: ""
+  # Or give the credential itself, and the chart puts it in the Secret. The
+  # gateway does this for a server it deploys, because it has to know the
+  # credential to send it. Pass it on standard input (--values -), never with
+  # --set, which would show it in the process list.
+  token: ""
 
 resources:
   requests:

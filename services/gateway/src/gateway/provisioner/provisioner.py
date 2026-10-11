@@ -1,45 +1,54 @@
-"""Makes the cluster match the stores table.
+"""Makes the cluster match what the database says should exist.
 
-The API only ever writes a row: "this store should exist", or "this store
-should go". This loop reads those rows and does the work, one task per store,
-several at a time:
+The API only ever writes a row: "this store should exist", "this server should
+run", or "this should go". This loop reads those rows and does the work, one
+task per row, several at a time. Two kinds of thing are provisioned, each an
+install of a Helm chart into a namespace of its own:
 
-    provisioning  ->  namespace, permissions, helm install, wait for the pods,
-                      register the store's MCP server in the gateway  ->  ready
-    deleting      ->  delete the namespace, wait until it is gone, drop the row
+    a store           the stores table            chart store        store-<slug>
+    a hosted server   upstream_servers.hosted     chart mcp-server   mcp-<slug>
+
+Both go through the same steps:
+
+    creating  ->  namespace, permissions, helm install, wait for the pods  ->  done
+    deleting  ->  delete the namespace, wait until it is gone, drop the row
 
 Every step first looks at what already exists and only does what is missing.
 That one property is what makes the rest safe: pressing "create" twice, retrying
-a failed store, and this process being restarted halfway through all come down
-to running the same steps again from the top.
+something that failed, and this process being restarted halfway through all
+come down to running the same steps again from the top.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import asyncpg
 
-from gateway import repo
+from gateway import hosted, repo
 from gateway.provisioner.helm import HelmError
 from gateway.provisioner.kube import KubeError
-from gateway.repo import Store
+from gateway.repo import Server, Store
 from gateway.security import CredentialCipher
 
 logger = logging.getLogger(__name__)
 
 # Only one provisioner works at a time, whichever holds this Postgres lock.
 LEADER_LOCK_ID = 7_265_001
-# The label that marks a namespace as created by the provisioner. The cluster's
-# admission policy lets the provisioner touch only namespaces that carry it.
+# The label that marks a namespace as created for a store. Hosted servers have
+# their own (hosted.LABEL). The cluster's admission policy lets the provisioner
+# touch only namespaces that carry one of the two.
 MANAGED_LABEL = "mcp-gateway/store"
 RELEASE = "store"
+
+Say = Callable[[str], Awaitable[None]]
 
 
 class KubeApi(Protocol):
@@ -54,7 +63,10 @@ class KubeApi(Protocol):
 
 class HelmCli(Protocol):
     async def status(self, namespace: str, release: str) -> str | None: ...
-    async def install(self, namespace: str, release: str, chart: str, values_files: list[str], values: dict[str, str]) -> None: ...
+    async def install(
+        self, namespace: str, release: str, chart: str, values_files: list[str], values: dict[str, str],
+        secret_values: dict[str, Any] | None = None,
+    ) -> None: ...
     async def uninstall(self, namespace: str, release: str) -> None: ...
 
 
@@ -64,11 +76,13 @@ class ProvisionerSettings:
     # Values files applied to every store, in order: the environment's file
     # from the chart itself, then the deployment's overrides.
     values_files: tuple[str, ...] = ()
+    # The chart a hosted MCP server is installed from.
+    server_chart: str = "/charts/mcp-server"
     # The public hostname of a store, with {slug} standing for its identifier.
     host_template: str = "{slug}.localhost"
     url_scheme: str = "http"
     cluster_domain: str = "cluster.local"
-    # The ClusterRole holding what installing a store needs, and who to grant it to.
+    # The ClusterRole holding what an install needs, and who to grant it to.
     installer_role: str = "gateway-store-installer"
     service_account: str = "gateway-provisioner"
     service_account_namespace: str = "gateway"
@@ -90,7 +104,9 @@ def waiting_on(workloads: list[dict], pods: list[dict]) -> list[str]:
         wanted = workload["spec"].get("replicas", 1)
         status = workload.get("status", {})
         current = status.get("observedGeneration") == workload["metadata"].get("generation")
-        if current and status.get("readyReplicas", 0) >= wanted:
+        # updatedReplicas: after a change, pods of the old version do not count.
+        updated = status.get("updatedReplicas", status.get("readyReplicas", 0))
+        if current and status.get("readyReplicas", 0) >= wanted and updated >= wanted:
             continue
         name = workload["metadata"]["name"]
         reason = next(
@@ -113,7 +129,11 @@ def pod_state(workload: str, pods: list[dict]) -> str:
             for container in containers:
                 state = container.get("state", {})
                 if "waiting" in state and state["waiting"].get("reason") not in (None, "PodInitializing"):
-                    return state["waiting"]["reason"]
+                    waiting = state["waiting"]
+                    # "CreateContainerConfigError" alone says little; its message says, for
+                    # instance, that the image wants to run as root.
+                    message = waiting.get("message", "") if waiting["reason"].endswith("Error") else ""
+                    return f"{waiting['reason']}: {message}"[:200] if message else waiting["reason"]
                 if "running" in state and kind == "init":
                     return f"running its {container['name']} step"
                 if "running" in state and not container.get("ready"):
@@ -164,13 +184,16 @@ class Provisioner:
             Path(self._settings.heartbeat_file).touch()
 
     async def tick(self) -> None:
-        """Starts a task for every store that needs work and does not have one."""
-        for store_id, task in list(self._tasks.items()):
+        """Starts a task for every row that needs work and does not have one."""
+        for row_id, task in list(self._tasks.items()):
             if task.done():
-                del self._tasks[store_id]
+                del self._tasks[row_id]
         for store in await repo.list_stores(self._pool, ("provisioning", "deleting")):
             if store.id not in self._tasks:
-                self._tasks[store.id] = asyncio.create_task(self._work(store), name=f"store-{store.slug}")
+                self._tasks[store.id] = asyncio.create_task(self._work_on_store(store.id), name=f"store-{store.slug}")
+        for server in await repo.list_hosted_work(self._pool):
+            if server.id not in self._tasks:
+                self._tasks[server.id] = asyncio.create_task(self._work_on_server(server.id), name=f"mcp-{server.slug}")
 
     async def stop(self) -> None:
         for task in self._tasks.values():
@@ -182,87 +205,164 @@ class Provisioner:
         """Waits for the tasks started so far. For tests."""
         await asyncio.gather(*self._tasks.values())
 
-    async def _work(self, store: Store) -> None:
+    async def _work_on_store(self, store_id: UUID) -> None:
         async with self._slots:
             # It may have waited for a free slot; see what is wanted now.
-            store = await repo.get_store(self._pool, store.id)
+            store = await repo.get_store(self._pool, store_id)
             if store is None or store.status not in ("provisioning", "deleting"):
                 return
-            try:
-                if store.status == "deleting":
-                    await self._teardown(store)
-                else:
-                    await self._provision(store)
-            except asyncio.CancelledError:
-                raise
-            except Failed as failure:
-                await self._fail(store, str(failure))
-            except HelmError as error:
-                await self._fail(store, f"Helm could not install the store: {error}")
-            except KubeError as error:
-                if store.status == "provisioning" and 400 <= error.status < 500 and error.status not in (409, 429):
-                    # Not allowed, or not valid: asking again will not change the answer.
-                    await self._fail(store, f"Kubernetes refused: {error.message}")
-                else:
-                    await self._retry_later(store, error)
-            except Exception as error:
-                await self._retry_later(store, error)
+            creating = store.status == "provisioning"
+            await self._attempt(
+                f"store {store.slug}",
+                self._provision(store) if creating else self._teardown(store),
+                creating=creating,
+                fail=lambda reason: repo.finish_store(self._pool, store.id, "failed", reason),
+                say=lambda detail: repo.set_store_detail(self._pool, store.id, detail),
+            )
 
-    async def _fail(self, store: Store, reason: str) -> None:
-        logger.warning("store %s failed: %s", store.slug, reason)
-        await repo.finish_store(self._pool, store.id, "failed", reason)
+    async def _work_on_server(self, server_id: UUID) -> None:
+        async with self._slots:
+            server = await repo.get_server(self._pool, server_id)
+            if server is None or server.hosted_status not in ("deploying", "deleting"):
+                return
+            creating = server.hosted_status == "deploying"
+            await self._attempt(
+                f"hosted server {server.slug}",
+                self._deploy(server) if creating else self._remove(server),
+                creating=creating,
+                fail=lambda reason: repo.finish_hosted(self._pool, server.id, "failed", reason),
+                say=lambda detail: repo.set_hosted_detail(self._pool, server.id, detail),
+            )
 
-    async def _retry_later(self, store: Store, error: Exception) -> None:
-        # The Kubernetes API or the database hiccuped. The store stays as it is
-        # and the next tick starts again from the top; the timeout still applies.
-        logger.warning("store %s: interrupted (%s), will try again", store.slug, error)
-        await repo.set_store_detail(self._pool, store.id, f"Trying again after an error: {error}"[:300])
+    async def _attempt(self, what: str, work: Awaitable[None], *, creating: bool, fail: Callable[[str], Awaitable[Any]], say: Say) -> None:
+        """Runs one pass of work and sorts its failures into "give up" and "try again"."""
+        try:
+            await work
+            return
+        except asyncio.CancelledError:
+            raise
+        except Failed as failure:
+            reason = str(failure)
+        except HelmError as error:
+            reason = f"Helm could not install it: {error}"
+        except KubeError as error:
+            if not (creating and 400 <= error.status < 500 and error.status not in (409, 429)):
+                reason = None
+                error_text = str(error)
+            else:
+                # Not allowed, or not valid: asking again will not change the answer.
+                reason = f"Kubernetes refused: {error.message}"
+        except Exception as error:
+            reason, error_text = None, str(error)
+        if reason is not None and creating:
+            logger.warning("%s failed: %s", what, reason)
+            await fail(reason)
+        else:
+            # The Kubernetes API or the database hiccuped. The row stays as it is
+            # and the next tick starts again from the top; the timeout still applies.
+            text = reason or error_text
+            logger.warning("%s: interrupted (%s), will try again", what, text)
+            await say(f"Trying again after an error: {text}"[:300])
 
-    # --- creating --------------------------------------------------------------
+    # --- steps shared by stores and hosted servers ------------------------------------
 
-    async def _provision(self, store: Store) -> None:
-        settings = self._settings
-        namespace = store.namespace
-        deadline = store.started_at + timedelta(seconds=settings.timeout_seconds)
-        minutes = f"{settings.timeout_seconds / 60:g} minutes"
+    def _deadline(self, started_at: datetime) -> Callable[[str], None]:
+        """Returns a check that gives up once the timeout, counted from when the attempt began, has passed."""
+        deadline = started_at + timedelta(seconds=self._settings.timeout_seconds)
+        minutes = f"{self._settings.timeout_seconds / 60:g} minutes"
 
-        def check_deadline(doing: str) -> None:
+        def check(doing: str) -> None:
             if datetime.now(UTC) > deadline:
                 raise Failed(f"Gave up after {minutes}. Last seen: {doing}")
 
-        check_deadline(store.detail or "nothing had started")
+        return check
 
-        await self._say(store, "Creating the namespace")
+    async def _ensure_namespace(self, namespace: str, label: str, slug: str) -> bool:
+        """Creates the namespace and gives this process the installer role in it.
+
+        False if a namespace of that name is still being removed: come back later.
+        """
         existing = await self._kube.get_namespace(namespace)
         if existing is None:
             await self._kube.create_namespace(
                 namespace,
                 {
-                    MANAGED_LABEL: store.slug,
+                    label: slug,
                     # Kubernetes itself refuses any pod here that asks for root,
                     # host access or extra privileges.
                     "pod-security.kubernetes.io/enforce": "restricted",
                 },
             )
-        elif existing["metadata"].get("labels", {}).get(MANAGED_LABEL) != store.slug:
-            raise Failed(f"A namespace called {namespace} already exists and was not created for this store.")
+        elif existing["metadata"].get("labels", {}).get(label) != slug:
+            raise Failed(f"A namespace called {namespace} already exists and was not created for this.")
         elif existing.get("status", {}).get("phase") == "Terminating":
-            # A store of the same name was deleted a moment ago. Wait for it to go.
-            await self._say(store, "Waiting for the previous store of this name to finish being removed")
-            return
+            return False
+        settings = self._settings
         await self._kube.bind_cluster_role(
             namespace, "store-installer", settings.installer_role, settings.service_account,
             settings.service_account_namespace,
         )
+        return True
 
-        release = await self._helm.status(namespace, RELEASE)
-        if release and release.startswith("pending"):
-            # An install was cut off halfway, most likely by this process being
-            # restarted. Helm will not touch a release in that state, so clear it.
-            await self._helm.uninstall(namespace, RELEASE)
-            release = None
-        if release != "deployed":
-            await self._say(store, "Installing WordPress, WooCommerce and the database")
+    async def _clear_interrupted_install(self, namespace: str, release: str) -> str | None:
+        """The release's state, after clearing one that was cut off halfway.
+
+        An install interrupted by this process being restarted is left "pending",
+        and helm will not touch a release in that state.
+        """
+        state = await self._helm.status(namespace, release)
+        if state and state.startswith("pending"):
+            await self._helm.uninstall(namespace, release)
+            return None
+        return state
+
+    async def _wait_until_ready(self, namespace: str, still_wanted: Callable[[], Awaitable[bool]], check_deadline: Callable[[str], None], say: Say) -> bool:
+        """Waits for every Deployment and StatefulSet in the namespace. False if the thing was deleted meanwhile."""
+        while True:
+            if not await still_wanted():
+                return False
+            workloads = await self._kube.workloads(namespace)
+            waiting = waiting_on(workloads, await self._kube.pods(namespace)) if workloads else ["its pods"]
+            if not waiting:
+                return True
+            doing = "Waiting for " + ", ".join(waiting)
+            check_deadline(doing)
+            await say(doing)
+            await asyncio.sleep(self._settings.poll_seconds)
+
+    async def _remove_namespace(self, namespace: str, label: str, slug: str, say: Say) -> None:
+        """Deletes the namespace if it is ours, and waits until it is gone."""
+        while True:
+            existing = await self._kube.get_namespace(namespace)
+            if existing is None:
+                return
+            if existing["metadata"].get("labels", {}).get(label) != slug:
+                return  # never ours: creating it failed because it already existed
+            if existing.get("status", {}).get("phase") != "Terminating":
+                # Deleting the namespace takes everything with it: the pods, the
+                # volumes, the Secrets, the Ingress and the permission this
+                # process was given there.
+                await self._kube.delete_namespace(namespace)
+            await say("Removing the namespace and everything in it")
+            await asyncio.sleep(self._settings.poll_seconds)
+
+    # --- stores ------------------------------------------------------------------------
+
+    async def _provision(self, store: Store) -> None:
+        settings = self._settings
+        namespace = store.namespace
+        say: Say = lambda detail: repo.set_store_detail(self._pool, store.id, detail)  # noqa: E731
+        check_deadline = self._deadline(store.started_at)
+        check_deadline(store.detail or "nothing had started")
+
+        await say("Creating the namespace")
+        if not await self._ensure_namespace(namespace, MANAGED_LABEL, store.slug):
+            # A store of the same name was deleted a moment ago. Wait for it to go.
+            await say("Waiting for the previous store of this name to finish being removed")
+            return
+
+        if await self._clear_interrupted_install(namespace, RELEASE) != "deployed":
+            await say("Installing WordPress, WooCommerce and the database")
             host = settings.host_template.format(slug=store.slug)
             await self._helm.install(
                 namespace, RELEASE, settings.chart, list(settings.values_files),
@@ -276,20 +376,14 @@ class Provisioner:
                 },
             )
 
-        while True:
+        async def still_wanted() -> bool:
             current = await repo.get_store(self._pool, store.id)
-            if current is None or current.status != "provisioning":
-                return  # deleted while it was being created
-            workloads = await self._kube.workloads(namespace)
-            waiting = waiting_on(workloads, await self._kube.pods(namespace)) if workloads else ["the store's pods"]
-            if not waiting:
-                break
-            doing = "Waiting for " + ", ".join(waiting)
-            check_deadline(doing)
-            await self._say(store, doing)
-            await asyncio.sleep(settings.poll_seconds)
+            return current is not None and current.status == "provisioning"
 
-        await self._say(store, "Registering the store's tools in the gateway")
+        if not await self._wait_until_ready(namespace, still_wanted, check_deadline, say):
+            return  # deleted while it was being created
+
+        await say("Registering the store's tools in the gateway")
         secrets = await self._kube.read_secret(namespace, f"{RELEASE}-secrets") or {}
         token = secrets.get("mcp-auth-token")
         if not token:
@@ -302,25 +396,55 @@ class Provisioner:
         if await repo.finish_store(self._pool, store.id, "ready", None, url=public):
             logger.info("store %s is ready at %s", store.slug, public)
 
-    # --- removing ----------------------------------------------------------------
-
     async def _teardown(self, store: Store) -> None:
-        namespace = store.namespace
-        while True:
-            existing = await self._kube.get_namespace(namespace)
-            if existing is None:
-                break
-            if existing["metadata"].get("labels", {}).get(MANAGED_LABEL) != store.slug:
-                break  # never ours: provisioning failed because it already existed
-            if existing.get("status", {}).get("phase") != "Terminating":
-                # Deleting the namespace takes everything with it: the pods, the
-                # database and its volumes, the Secrets, the Ingress and the
-                # permission this process was given there.
-                await self._kube.delete_namespace(namespace)
-            await self._say(store, "Removing the namespace and everything in it")
-            await asyncio.sleep(self._settings.poll_seconds)
+        say: Say = lambda detail: repo.set_store_detail(self._pool, store.id, detail)  # noqa: E731
+        await self._remove_namespace(store.namespace, MANAGED_LABEL, store.slug, say)
         await repo.delete_store(self._pool, store.id)
         logger.info("store %s is gone", store.slug)
 
-    async def _say(self, store: Store, detail: str) -> None:
-        await repo.set_store_detail(self._pool, store.id, detail)
+    # --- hosted servers ----------------------------------------------------------------
+
+    async def _deploy(self, server: Server) -> None:
+        """Runs an admin's image as an MCP server. The gateway already has its row, URL and credential."""
+        spec = hosted.HostedSpec.from_json(server.hosted)
+        namespace = hosted.namespace(server.slug)
+        say: Say = lambda detail: repo.set_hosted_detail(self._pool, server.id, detail)  # noqa: E731
+        check_deadline = self._deadline(server.hosted_started_at)
+        check_deadline(server.hosted_detail or "nothing had started")
+
+        await say("Creating the namespace")
+        if not await self._ensure_namespace(namespace, hosted.LABEL, server.slug):
+            await say("Waiting for the previous server of this name to finish being removed")
+            return
+
+        # Unlike a store, the install runs on every pass: that is what applies a
+        # changed image or setting. Unchanged, it changes nothing.
+        await self._clear_interrupted_install(namespace, hosted.RELEASE)
+        await say(f"Starting {spec.image}")
+        # The gateway made this credential up and will present it on every
+        # call. Here it travels the other way, into the server's own Secret.
+        token = self._cipher.decrypt(server.auth_secret)
+        await self._helm.install(
+            namespace, hosted.RELEASE, self._settings.server_chart, [], {},
+            secret_values=hosted.chart_values(spec, token, self._settings.service_account_namespace),
+        )
+
+        async def still_wanted() -> bool:
+            current = await repo.get_server(self._pool, server.id)
+            # A new attempt (an edit, a retry) is someone else's to finish.
+            return (
+                current is not None
+                and current.hosted_status == "deploying"
+                and current.hosted_started_at == server.hosted_started_at
+            )
+
+        if not await self._wait_until_ready(namespace, still_wanted, check_deadline, say):
+            return
+        if await repo.finish_hosted(self._pool, server.id, "running", None):
+            logger.info("hosted server %s is running %s", server.slug, spec.image)
+
+    async def _remove(self, server: Server) -> None:
+        say: Say = lambda detail: repo.set_hosted_detail(self._pool, server.id, detail)  # noqa: E731
+        await self._remove_namespace(hosted.namespace(server.slug), hosted.LABEL, server.slug, say)
+        await repo.delete_hosted(self._pool, server.id)
+        logger.info("hosted server %s is gone", server.slug)

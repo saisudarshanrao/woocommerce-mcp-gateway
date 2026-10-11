@@ -37,10 +37,10 @@ GATEWAY_RELEASE   ?= gateway
 GATEWAY_IMAGE     := $(REGISTRY)/gateway
 DASHBOARD_IMAGE   := $(REGISTRY)/gateway-dashboard
 GATEWAY_TAG        = $(shell ./scripts/image-tag.sh services/gateway)
-# The provisioner image holds the gateway's code and the store chart, so its
-# tag is a hash of both.
+# The provisioner image holds the gateway's code and the two charts it
+# installs, so its tag is a hash of all three.
 PROVISIONER_IMAGE := $(REGISTRY)/gateway-provisioner
-PROVISIONER_TAG    = $(shell ./scripts/image-tag.sh services/gateway charts/store)
+PROVISIONER_TAG    = $(shell ./scripts/image-tag.sh services/gateway charts/store charts/mcp-server)
 DASHBOARD_TAG      = $(shell ./scripts/image-tag.sh services/dashboard)
 
 .DEFAULT_GOAL := help
@@ -49,7 +49,7 @@ DASHBOARD_TAG      = $(shell ./scripts/image-tag.sh services/dashboard)
         mcp-test mcp-smoke isolation-smoke \
         mcp-servers-up mcp-servers-down tasks-token \
         gateway-image gateway-up gateway-down gateway-status gateway-logs gateway-password gateway-test gateway-smoke \
-        stores-smoke chat-smoke llm-key up down smoke test
+        stores-smoke hosted-smoke chat-smoke llm-key up down smoke test
 
 help: ## List the available targets
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -133,7 +133,8 @@ tasks-token: ## Print the credential the tasks server expects (header X-API-Key)
 
 gateway-image: ## Build the gateway's images (API, provisioner, dashboard) and push them to the registry
 	@./scripts/build-image.sh services/gateway $(GATEWAY_IMAGE)
-	@IMAGE_TAG=$(PROVISIONER_TAG) BUILD_ARGS="--target provisioner --build-context store-chart=charts/store" \
+	@IMAGE_TAG=$(PROVISIONER_TAG) \
+		BUILD_ARGS="--target provisioner --build-context store-chart=charts/store --build-context server-chart=charts/mcp-server" \
 		./scripts/build-image.sh services/gateway $(PROVISIONER_IMAGE)
 	@./scripts/build-image.sh services/dashboard $(DASHBOARD_IMAGE)
 
@@ -151,8 +152,9 @@ gateway-up: gateway-image store-image ## Install or upgrade the gateway, then wa
 		--set provisioner.storeValues.wooMcp.image.tag=$(WOO_MCP_TAG) \
 		--wait --timeout 10m
 
-gateway-down: ## Remove the gateway, every store created from its dashboard, and all of their data
+gateway-down: ## Remove the gateway, every store and hosted server created from its dashboard, and all their data
 	-$(KUBECTL) delete namespace --selector mcp-gateway/store --ignore-not-found
+	-$(KUBECTL) delete namespace --selector mcp-gateway/hosted --ignore-not-found
 	-$(HELM) uninstall $(GATEWAY_RELEASE) --namespace $(GATEWAY_NAMESPACE)
 	$(KUBECTL) delete namespace $(GATEWAY_NAMESPACE) --ignore-not-found
 
@@ -194,10 +196,14 @@ stores-smoke: ## Create two stores from the dashboard's API, compare their order
 	@python3 scripts/smoke_stores.py --url $(GATEWAY_URL) --context $(KUBE_CONTEXT) \
 		--namespace $(GATEWAY_NAMESPACE) --release $(GATEWAY_RELEASE)
 
+hosted-smoke: ## Add an MCP server by container image, use it, check its isolation, change it, remove it
+	@python3 scripts/smoke_hosted.py --url $(GATEWAY_URL) --context $(KUBE_CONTEXT) \
+		--namespace $(GATEWAY_NAMESPACE) --release $(GATEWAY_RELEASE)
+
 # Not part of `make smoke`: it needs the model's API key and uses the free tier's quota.
 chat-smoke: ## Ask the real model to create a product and report today's orders; STORES=1 adds the two-store comparison
 	@python3 scripts/smoke_chat.py --gateway-url $(GATEWAY_URL) --store-url $(STORE_URL) --context $(KUBE_CONTEXT) \
 		--gateway-namespace $(GATEWAY_NAMESPACE) --gateway-release $(GATEWAY_RELEASE) \
 		--store-namespace $(STORE_NAMESPACE) --store-release $(STORE_RELEASE) $(if $(STORES),--stores,)
 
-smoke: store-smoke mcp-smoke gateway-smoke isolation-smoke stores-smoke ## Run every end-to-end check against the cluster
+smoke: store-smoke mcp-smoke gateway-smoke isolation-smoke stores-smoke hosted-smoke ## Run every end-to-end check against the cluster

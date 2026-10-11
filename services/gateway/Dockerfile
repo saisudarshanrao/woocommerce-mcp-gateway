@@ -23,14 +23,16 @@ RUN uv sync --frozen --no-dev --no-editable
 
 
 # The provisioner: the same code started differently (python -m
-# gateway.provisioner), plus the two things it needs to create stores: the helm
-# command and the store chart. It is a separate image so that the API, which
-# faces the internet, carries neither. Built with
+# gateway.provisioner), plus what it needs to create stores and run hosted MCP
+# servers: the helm command and the two charts. It is a separate image so that
+# the API, which faces the internet, carries none of it. Built with
 #   --target provisioner --build-context store-chart=charts/store
+#                        --build-context server-chart=charts/mcp-server
 FROM python:3.14-slim AS provisioner
 
 COPY --from=alpine/helm:4.3.0 /usr/bin/helm /usr/local/bin/helm
 COPY --from=store-chart . /charts/store
+COPY --from=server-chart . /charts/mcp-server
 COPY --from=build /app/.venv /app/.venv
 # The root filesystem is read-only at run time; helm keeps its files in /tmp.
 ENV PATH="/app/.venv/bin:$PATH" \

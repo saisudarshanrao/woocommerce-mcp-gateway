@@ -10,7 +10,7 @@ metadata:
     {{- include "mcp-server.labels" . | nindent 4 }}
 type: Opaque
 data:
-  token: {{ get $existing "token" | default (randAlphaNum 48 | b64enc) | quote }}
+  token: {{ ternary (.Values.auth.token | b64enc) (get $existing "token" | default (randAlphaNum 48 | b64enc)) (not (empty .Values.auth.token)) | quote }}
 ---
 {{- end }}
 # ClusterIP and nothing else: the server has no address outside the cluster.
@@ -90,21 +90,15 @@ spec:
             - name: http
               containerPort: {{ .Values.port }}
           startupProbe:
-            httpGet:
-              path: {{ .Values.healthPath }}
-              port: http
+            {{- include "mcp-server.probe" . | nindent 12 }}
             periodSeconds: 2
             failureThreshold: 30
           readinessProbe:
-            httpGet:
-              path: {{ .Values.healthPath }}
-              port: http
+            {{- include "mcp-server.probe" . | nindent 12 }}
             periodSeconds: 10
             timeoutSeconds: 3
           livenessProbe:
-            httpGet:
-              path: {{ .Values.healthPath }}
-              port: http
+            {{- include "mcp-server.probe" . | nindent 12 }}
             periodSeconds: 20
             timeoutSeconds: 3
           resources:

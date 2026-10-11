@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -9,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from gateway import naming, repo
+from gateway import hosted, naming, repo, security
 from gateway.api.deps import admin_user, current_user, parts
 from gateway.repo import Server, User
 from gateway.upstreams import UpstreamState
@@ -21,10 +22,30 @@ AuthType = Literal["none", "bearer", "header"]
 MemberAccess = Literal["all", "read_only", "none"]
 
 
+class Deployment(BaseModel):
+    """A server to run from a container image, in place of a URL."""
+
+    image: str = Field(max_length=255)
+    args: list[str] = []
+    env: dict[str, str] = {}
+    port: int = 8080
+    path: str = "/mcp"
+    health_path: str = ""
+    internet: bool = False
+
+    def spec(self) -> hosted.HostedSpec:
+        return hosted.HostedSpec(
+            image=self.image.strip(), args=tuple(self.args), env=self.env, port=self.port,
+            path=self.path.strip(), health_path=self.health_path.strip(), internet=self.internet,
+        )
+
+
 class NewServer(BaseModel):
     slug: str = Field(description="Short identifier; becomes the prefix of every tool name.")
     name: str = Field(min_length=1, max_length=80)
-    url: str
+    # Exactly one of the two: where the server is, or what to run.
+    url: str | None = None
+    hosted: Deployment | None = None
     auth_type: AuthType = "none"
     auth_header: str | None = Field(default=None, max_length=100)
     credential: str | None = Field(default=None, max_length=4000)
@@ -36,6 +57,8 @@ class NewServer(BaseModel):
 class ServerChange(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     url: str | None = None
+    # For a hosted server: a new image or settings, which redeploys it.
+    hosted: Deployment | None = None
     auth_type: AuthType | None = None
     auth_header: str | None = Field(default=None, max_length=100)
     # Left out means "keep the stored credential".
@@ -43,6 +66,20 @@ class ServerChange(BaseModel):
     timeout_seconds: int | None = Field(default=None, ge=1, le=300)
     member_access: MemberAccess | None = None
     enabled: bool | None = None
+
+
+def checked_spec(deployment: Deployment, slug: str, app) -> hosted.HostedSpec:
+    """The deployment an admin asked for, if this gateway can and may run it."""
+    if not app.settings.hosted_enabled:
+        raise HTTPException(409, "This gateway cannot run servers from an image: it has no provisioner. Add the server by URL.")
+    if slug.endswith("-"):
+        raise HTTPException(422, "The identifier of a hosted server cannot end with a hyphen: it names a namespace.")
+    spec = deployment.spec()
+    try:
+        spec.validate(app.settings.hosted_image_prefixes)
+    except hosted.InvalidSpec as invalid:
+        raise HTTPException(422, str(invalid)) from invalid
+    return spec
 
 
 async def check_url(url: str, guard: UrlGuard) -> str:
@@ -78,6 +115,8 @@ def server_json(server: Server, state: UpstreamState | None, viewer: User) -> di
         "member_access": server.member_access,
         # True for the server of a store created from the dashboard.
         "managed": server.store_id is not None,
+        # For a server the platform runs from an image: how its deployment is going.
+        "hosted": {"status": server.hosted_status, "detail": server.hosted_detail} if server.hosted else None,
         "tools": [
             {
                 "name": tool.tool.name,
@@ -103,15 +142,31 @@ def server_json(server: Server, state: UpstreamState | None, viewer: User) -> di
                 "credential_set": server.auth_secret is not None,
             },
         }
+        if server.hosted:
+            spec = hosted.HostedSpec.from_json(server.hosted)
+            payload["hosted"] |= {
+                "image": spec.image, "args": list(spec.args), "env": spec.env, "port": spec.port, "path": spec.path,
+                "health_path": spec.health_path, "internet": spec.internet, "namespace": hosted.namespace(server.slug),
+            }
     return payload
 
 
 @router.get("/servers")
 async def list_servers(request: Request, user: User = Depends(current_user)) -> list[dict]:
     app = parts(request)
-    return [
-        server_json(server, app.upstreams.state(server.id), user) for server in await repo.list_servers(app.pool)
-    ]
+
+    async def known(server: Server) -> UpstreamState | None:
+        # What was learned about an earlier version of the server (before an
+        # edit, or before it was deployed) says nothing about this one, so it
+        # is checked now rather than shown stale until the next round.
+        state = app.upstreams.state(server.id)
+        if state is None or state.server.updated_at != server.updated_at:
+            state = await app.upstreams.refresh(server.id)
+        return state
+
+    servers = await repo.list_servers(app.pool)
+    states = await asyncio.gather(*(known(server) for server in servers))
+    return [server_json(server, state, user) for server, state in zip(servers, states)]
 
 
 @router.post("/servers", status_code=201)
@@ -124,23 +179,39 @@ async def add_server(body: NewServer, request: Request, admin: User = Depends(ad
         )
     if await repo.get_server_by_slug(app.pool, slug):
         raise HTTPException(409, f"A server with the identifier '{slug}' already exists.")
+    if (body.url is None) == (body.hosted is None):
+        raise HTTPException(422, "Give either the server's URL or an image to run, not both.")
+
+    common = dict(
+        created_by=admin.id, slug=slug, name=body.name.strip(), enabled=body.enabled,
+        timeout_seconds=body.timeout_seconds, member_access=body.member_access,
+    )
+    if body.hosted is not None:
+        spec = checked_spec(body.hosted, slug, app)
+        # The gateway invents the credential and will give it to the server.
+        # Nobody types it and it is never shown.
+        server = await repo.create_server(
+            app.pool,
+            **common,
+            url=hosted.url(slug, spec, app.settings.cluster_domain),
+            auth_type="bearer",
+            auth_secret=app.cipher.encrypt(security.new_token()),
+            hosted=spec.to_json(),
+        )
+        # Not checked yet: there is nothing to connect to until it has been deployed.
+        return server_json(server, None, admin)
+
     if body.auth_type != "none" and not body.credential:
         raise HTTPException(422, "This kind of authentication needs a credential.")
     if body.auth_type == "header" and not body.auth_header:
         raise HTTPException(422, "Name the header the credential is sent in.")
-
     server = await repo.create_server(
         app.pool,
-        created_by=admin.id,
-        slug=slug,
-        name=body.name.strip(),
+        **common,
         url=await check_url(body.url, app.url_guard),
         auth_type=body.auth_type,
         auth_header=body.auth_header.strip() if body.auth_type == "header" and body.auth_header else None,
         auth_secret=app.cipher.encrypt(body.credential) if body.auth_type != "none" else None,
-        enabled=body.enabled,
-        timeout_seconds=body.timeout_seconds,
-        member_access=body.member_access,
     )
     return server_json(server, await app.upstreams.refresh(server.id), admin)
 
@@ -154,7 +225,23 @@ async def change_server(
     if current is None:
         raise HTTPException(404, "No such server.")
 
-    changes: dict[str, Any] = body.model_dump(exclude_unset=True, exclude={"credential"})
+    changes: dict[str, Any] = body.model_dump(exclude_unset=True, exclude={"credential", "hosted"})
+    if current.hosted:
+        # Where a hosted server is and how it is authenticated are the platform's to decide.
+        if {"url", "auth_type", "auth_header"} & changes.keys() or body.credential:
+            raise HTTPException(409, "This server is run by the platform, which sets its address and credential itself.")
+        if current.hosted_status == "deleting":
+            raise HTTPException(409, "This server is being removed.")
+        server = await repo.update_server(app.pool, server_id, changes)
+        if body.hosted is not None:
+            spec = checked_spec(body.hosted, current.slug, app)
+            if spec.to_json() != current.hosted:
+                server = await repo.redeploy_hosted(
+                    app.pool, server_id, spec.to_json(), hosted.url(current.slug, spec, app.settings.cluster_domain)
+                )
+        return server_json(server, await app.upstreams.refresh(server_id), admin)
+    if body.hosted is not None:
+        raise HTTPException(409, "This server was added by URL. To run an image instead, add a new server.")
     if "url" in changes:
         changes["url"] = await check_url(changes["url"], app.url_guard)
     auth_type = changes.get("auth_type", current.auth_type)
@@ -180,9 +267,24 @@ async def remove_server(server_id: UUID, request: Request, _: User = Depends(adm
     server = await repo.get_server(app.pool, server_id)
     if server and server.store_id:
         raise HTTPException(409, "This server belongs to a store. Delete the store and it goes with it.")
+    if server and server.hosted:
+        # Its tools go now; the provisioner removes what was deployed, then the row.
+        await repo.mark_hosted_deleting(app.pool, server_id)
+        await app.upstreams.refresh(server_id)
+        return
     if not await repo.delete_server(app.pool, server_id):
         raise HTTPException(404, "No such server.")
     await app.upstreams.refresh(server_id)
+
+
+@router.post("/servers/{server_id}/redeploy")
+async def redeploy_server(server_id: UUID, request: Request, admin: User = Depends(admin_user)) -> dict:
+    """Deploys a hosted server again as it is: another go after a failure, or a restart."""
+    app = parts(request)
+    server = await repo.redeploy_hosted(app.pool, server_id)
+    if server is None:
+        raise HTTPException(409, "Only a server run by the platform, and not being removed, can be redeployed.")
+    return server_json(server, await app.upstreams.refresh(server_id), admin)
 
 
 @router.post("/servers/{server_id}/refresh")

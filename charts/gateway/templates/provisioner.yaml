@@ -3,7 +3,8 @@
 {{- $name := printf "%s-provisioner" $fullname }}
 {{- $installer := printf "%s-store-installer" $fullname }}
 # The provisioner creates and removes the stores people ask for in the
-# dashboard. It is the only component that talks to the Kubernetes API, and it
+# dashboard, and the MCP servers an admin adds by container image. It is the
+# only component that talks to the Kubernetes API, and it
 # is kept apart from the API pods for that reason: the part of the system that
 # faces the internet holds no cluster credentials at all.
 apiVersion: v1
@@ -53,8 +54,8 @@ subjects:
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
 ---
-# What installing one store takes: exactly the kinds of object the store chart
-# contains, plus reading pods to report progress. This role is never bound
+# What installing one store or one hosted MCP server takes: exactly the kinds of
+# object the two charts contain, plus reading pods to report progress. This role is never bound
 # across the cluster. The provisioner binds it to itself inside each store's
 # namespace, so it holds these permissions there and nowhere else.
 apiVersion: rbac.authorization.k8s.io/v1
@@ -84,8 +85,8 @@ rules:
 # the provisioner delete any namespace, or grant itself the installer role in
 # kube-system. This admission policy closes that. Kubernetes evaluates it on
 # every create or delete the provisioner attempts on the kinds listed, and
-# refuses unless the namespace carries the label that only the provisioner's
-# own namespaces have. The provisioner cannot add that label to a namespace
+# refuses unless the namespace carries one of the two labels that only the
+# provisioner's own namespaces have (one for stores, one for hosted servers). The provisioner cannot add that label to a namespace
 # that exists: it has no permission to update one.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
@@ -111,17 +112,21 @@ spec:
   validations:
     - expression: >-
         request.kind.kind != "Namespace" || request.operation != "CREATE" ||
-        (object.metadata.name.startsWith("store-") && has(object.metadata.labels) &&
-        "mcp-gateway/store" in object.metadata.labels &&
-        object.metadata.labels["mcp-gateway/store"] == object.metadata.name.substring(6))
-      message: The provisioner may only create namespaces named store-<slug> that carry the label mcp-gateway/store=<slug>.
+        (has(object.metadata.labels) && (
+        (object.metadata.name.startsWith("store-") && "mcp-gateway/store" in object.metadata.labels &&
+        object.metadata.labels["mcp-gateway/store"] == object.metadata.name.substring(6)) ||
+        (object.metadata.name.startsWith("mcp-") && "mcp-gateway/hosted" in object.metadata.labels &&
+        object.metadata.labels["mcp-gateway/hosted"] == object.metadata.name.substring(4))))
+      message: The provisioner may only create namespaces named store-<slug> or mcp-<slug> that carry its label for that slug.
     - expression: >-
         request.kind.kind != "Namespace" || request.operation != "DELETE" ||
-        (has(oldObject.metadata.labels) && "mcp-gateway/store" in oldObject.metadata.labels)
+        (has(oldObject.metadata.labels) && ("mcp-gateway/store" in oldObject.metadata.labels ||
+        "mcp-gateway/hosted" in oldObject.metadata.labels))
       message: The provisioner may only delete namespaces it created.
     - expression: >-
         request.kind.kind != "RoleBinding" ||
-        (has(namespaceObject.metadata.labels) && "mcp-gateway/store" in namespaceObject.metadata.labels)
+        (has(namespaceObject.metadata.labels) && ("mcp-gateway/store" in namespaceObject.metadata.labels ||
+        "mcp-gateway/hosted" in namespaceObject.metadata.labels))
       message: The provisioner may only grant itself permissions inside namespaces it created.
 ---
 apiVersion: admissionregistration.k8s.io/v1

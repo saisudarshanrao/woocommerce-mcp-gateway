@@ -23,8 +23,24 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 
 {{- define "mcp-server.image" -}}
 {{- $image := .Values.image }}
+{{- if $image.reference }}
+{{- $image.reference }}
+{{- else }}
 {{- $repository := ternary (printf "%s/%s" $image.registry $image.repository) $image.repository (not (empty $image.registry)) }}
 {{- printf "%s:%s" $repository $image.tag }}
+{{- end }}
+{{- end }}
+
+{{/* How Kubernetes checks the container: an HTTP path if one is given, else the open port. */}}
+{{- define "mcp-server.probe" -}}
+{{- if .Values.healthPath }}
+httpGet:
+  path: {{ .Values.healthPath }}
+  port: http
+{{- else }}
+tcpSocket:
+  port: http
+{{- end }}
 {{- end }}
 
 {{/* Every in-cluster name of the Service, plus loopback for port-forwarding. */}}

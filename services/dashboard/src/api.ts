@@ -26,6 +26,19 @@ export type ServerStatus = "connected" | "unreachable" | "disabled" | "pending";
 export type AuthType = "none" | "bearer" | "header";
 export type MemberAccess = "all" | "read_only" | "none";
 
+/** What to run for a server the platform hosts itself. */
+export interface Deployment {
+  image: string;
+  args: string[];
+  env: Record<string, string>;
+  port: number;
+  path: string;
+  health_path: string;
+  internet: boolean;
+}
+
+export type HostedStatus = "deploying" | "running" | "failed" | "deleting";
+
 export interface Server {
   id: string;
   slug: string;
@@ -39,6 +52,9 @@ export interface Server {
   member_access: MemberAccess;
   // True for the server of a store created from the dashboard.
   managed: boolean;
+  // Set for a server the platform runs from a container image. Members see
+  // only how the deployment is going; admins also see what is deployed.
+  hosted: ({ status: HostedStatus; detail: string | null } & Partial<Deployment> & { namespace?: string }) | null;
   tools: Tool[];
   skipped_tools: { name: string; reason: string }[];
   // The three below are sent to admins only. The credential itself is never sent.
@@ -51,6 +67,7 @@ export interface ServerInput {
   slug?: string;
   name?: string;
   url?: string;
+  hosted?: Deployment;
   auth_type?: AuthType;
   auth_header?: string | null;
   credential?: string;
@@ -113,6 +130,8 @@ export interface Config {
   chat_model: string;
   rate_limit_per_minute: number;
   stores_enabled: boolean;
+  hosted_enabled: boolean;
+  hosted_image_prefixes: string[];
   max_stores_per_user: number;
   // For example "http://{slug}.localhost".
   store_url_template: string;
@@ -189,6 +208,7 @@ export const api = {
   changeServer: (id: string, input: ServerInput) => request<Server>("PATCH", `/api/servers/${id}`, input),
   removeServer: (id: string) => request<void>("DELETE", `/api/servers/${id}`),
   refreshServer: (id: string) => request<Server>("POST", `/api/servers/${id}/refresh`),
+  redeployServer: (id: string) => request<Server>("POST", `/api/servers/${id}/redeploy`),
 
   keys: (everyone = false) => request<ApiKey[]>("GET", `/api/keys${everyone ? "?everyone=true" : ""}`),
   createKey: (name: string, userId?: string) => request<ApiKey>("POST", "/api/keys", { name, user_id: userId }),

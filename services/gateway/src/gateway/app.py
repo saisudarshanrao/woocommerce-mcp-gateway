@@ -130,6 +130,9 @@ def create_app(
             "chat_model": app_parts.chat_model.model if app_parts.chat_model else "",
             "rate_limit_per_minute": settings.rate_limit_per_minute,
             "stores_enabled": settings.stores_enabled,
+            # Whether a server can be added by container image, and which images are accepted.
+            "hosted_enabled": settings.hosted_enabled,
+            "hosted_image_prefixes": list(settings.hosted_image_prefixes),
             "max_stores_per_user": settings.max_stores_per_user,
             "store_url_template": settings.store_url_template,
         }

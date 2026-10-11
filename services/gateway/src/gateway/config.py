@@ -31,6 +31,11 @@ class Settings:
     upstream_allow_public: bool = True
     # Whether stores can be created from the dashboard. Needs the provisioner running.
     stores_enabled: bool = False
+    # Whether an admin can add a server by container image. Also needs the provisioner.
+    hosted_enabled: bool = False
+    # If set, a hosted server's image must start with one of these, for example "ghcr.io/acme/".
+    hosted_image_prefixes: tuple[str, ...] = ()
+    cluster_domain: str = "cluster.local"
     max_stores_per_user: int = 3
     # What a new store's address will be, with {slug} for its identifier. Shown in the form.
     store_url_template: str = ""
@@ -83,6 +88,9 @@ class Settings:
             upstream_internal_hosts=listed("UPSTREAM_INTERNAL_HOSTS"),
             upstream_allow_public=env.get("UPSTREAM_ALLOW_PUBLIC", "true").strip().lower() != "false",
             stores_enabled=env.get("STORES_ENABLED", "false").strip().lower() == "true",
+            hosted_enabled=env.get("HOSTED_ENABLED", "false").strip().lower() == "true",
+            hosted_image_prefixes=listed("HOSTED_IMAGE_PREFIXES"),
+            cluster_domain=env.get("CLUSTER_DOMAIN", "cluster.local").strip(),
             max_stores_per_user=int(env.get("MAX_STORES_PER_USER", "3")),
             store_url_template=env.get("STORE_URL_TEMPLATE", "").strip(),
             rate_limit_per_minute=int(env.get("RATE_LIMIT_PER_MINUTE", "0")),

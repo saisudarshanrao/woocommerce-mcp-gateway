@@ -20,6 +20,7 @@ def settings_from_env() -> ProvisionerSettings:
     return ProvisionerSettings(
         chart=env.get("STORE_CHART", "/charts/store"),
         values_files=tuple(f.strip() for f in env.get("STORE_VALUES_FILES", "").split(",") if f.strip()),
+        server_chart=env.get("SERVER_CHART", "/charts/mcp-server"),
         host_template=env.get("STORE_HOST_TEMPLATE", "{slug}.localhost"),
         url_scheme=env.get("STORE_URL_SCHEME", "http"),
         cluster_domain=env.get("CLUSTER_DOMAIN", "cluster.local"),

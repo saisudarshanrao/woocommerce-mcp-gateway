@@ -140,7 +140,7 @@ documentation is served at `/api/docs`.
 | Invitations | `POST /invites` (admin), `GET /invites/{token}`, `POST /invites/{token}/accept` |
 | Team (admin) | `GET /members`, `PATCH /members/{id}`, `DELETE /members/{id}` |
 | API keys | `GET /keys`, `POST /keys`, `DELETE /keys/{id}` |
-| Servers | `GET /servers`; admin: `POST`, `PATCH`, `DELETE`, `POST /servers/{id}/refresh` |
+| Servers | `GET /servers`; admin: `POST` (by `url`, or by `hosted` image), `PATCH`, `DELETE`, `POST /servers/{id}/refresh`, `POST /servers/{id}/redeploy` |
 | Audit log | `GET /audit` (admins see everyone's, members their own), `GET /stats` (per-server figures) |
 | Browser sign-in | `GET /oauth/requests/{id}`, `POST .../approve`, `POST .../deny`, `GET /oauth/grants`, `DELETE /oauth/grants/{id}` |
 | Stores | `GET /stores`, `POST /stores`, `POST /stores/{id}/retry`, `DELETE /stores/{id}` (owner or admin) |
@@ -164,11 +164,12 @@ Environment variables, set by the [chart](../../charts/gateway).
 | `UPSTREAM_INTERNAL_HOSTS`, `UPSTREAM_ALLOW_PUBLIC` | Which addresses a server URL may point at; see below |
 | `RATE_LIMIT_PER_MINUTE` | Tool calls per API key per minute; 0 is no limit |
 | `STORES_ENABLED`, `MAX_STORES_PER_USER`, `STORE_URL_TEMPLATE` | Stores from the dashboard |
+| `HOSTED_ENABLED`, `HOSTED_IMAGE_PREFIXES`, `CLUSTER_DOMAIN` | Servers added by container image |
 
 ## Beyond the core
 
 Each of these is a single module, written to be read on its own. The design
-reasoning is in [docs/PLAN.md](../../docs/PLAN.md), sections 4.8 to 4.11.
+reasoning is in [docs/PLAN.md](../../docs/PLAN.md), sections 4.8 to 4.13.
 
 | Module | What it does |
 |---|---|
@@ -176,8 +177,9 @@ reasoning is in [docs/PLAN.md](../../docs/PLAN.md), sections 4.8 to 4.11.
 | [metrics.py](src/gateway/metrics.py) | Prometheus counters and histograms, served at `/metrics` |
 | [oauth.py](src/gateway/oauth.py), [api/oauth.py](src/gateway/api/oauth.py) | Signing in from an MCP client with a browser: storage for the SDK's OAuth endpoints, and the consent step that ties a token to a user |
 | [toolsearch.py](src/gateway/toolsearch.py) | `find_tools` and `call_tool`: every tool behind two, at `/mcp/search` and in the chat |
+| [hosted.py](src/gateway/hosted.py) | A server run from a container image: what an admin may ask for, and how it becomes values for the mcp-server chart. The deploying is the provisioner's. |
 | [api/stores.py](src/gateway/api/stores.py) | Records that a store should exist or should go. Touches no Kubernetes API. |
-| [provisioner/provisioner.py](src/gateway/provisioner/provisioner.py) | The loop that makes the cluster match the stores table. Runs as its own Deployment: `python -m gateway.provisioner` |
+| [provisioner/provisioner.py](src/gateway/provisioner/provisioner.py) | The loop that makes the cluster match the stores table and the hosted servers. Runs as its own Deployment: `python -m gateway.provisioner` |
 | [provisioner/kube.py](src/gateway/provisioner/kube.py), [helm.py](src/gateway/provisioner/helm.py) | The handful of Kubernetes API calls it makes, and the helm command |
 
 The rate limit is in `Gateway.call_tool` ([core.py](src/gateway/core.py)) and

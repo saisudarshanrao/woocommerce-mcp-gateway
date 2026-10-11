@@ -59,6 +59,8 @@ upstreams:
   internalHosts:
     - "*.mcp-servers.svc.cluster.local"
     - "*-woo-mcp.store-*.svc.cluster.local"
+    # Servers the platform runs from an image, each in a namespace mcp-<slug>.
+    - "server-mcp.mcp-*.svc.cluster.local"
   # MCP servers on the public internet.
   allowPublic: true
 
@@ -123,6 +125,15 @@ provisioner:
   # dashboard. In production this needs a wildcard DNS record.
   hostTemplate: "{slug}.stores.example.com"
   maxStoresPerUser: 3
+  # MCP servers an admin adds by container image rather than by URL. Each is
+  # deployed from charts/mcp-server into a namespace mcp-<slug>, as a non-root
+  # container with resource limits and no outbound network unless the admin
+  # allows it.
+  hostedServers:
+    enabled: true
+    # If not empty, an image must start with one of these, for example
+    # "ghcr.io/acme/". Empty accepts an image from anywhere.
+    allowedImagePrefixes: []
   # A store that is not up by then is marked failed, with what it was waiting for.
   timeoutSeconds: 600
   # How many stores are worked on at once.

@@ -37,6 +37,7 @@ class FakeCluster:
         self.namespaces: dict[str, dict] = {}
         self.releases: dict[str, str] = {}  # namespace -> helm status
         self.installs: list[tuple[str, dict]] = []
+        self.server_installs: list[tuple] = []
         self.bindings: list[tuple[str, str, str]] = []
         self.ready: set[str] = set()  # namespaces whose pods have come up
         self.becomes_ready_after_checks = 2
@@ -79,9 +80,16 @@ class FakeCluster:
         if self._checks[namespace] > self.becomes_ready_after_checks:
             self.ready.add(namespace)
         up = namespace in self.ready
+        if namespace.startswith("mcp-"):
+            return [workload("server-mcp", up)]
         return [workload("store-wordpress", up), workload("store-mariadb", True), workload("store-woo-mcp", up)]
 
     async def pods(self, namespace):
+        if namespace.startswith("mcp-"):
+            return [{
+                "metadata": {"name": "server-mcp-xyz"},
+                "status": {"containerStatuses": [{"name": "server", "state": {"waiting": {"reason": "ImagePullBackOff"}}}]},
+            }]
         return [{
             "metadata": {"name": "store-wordpress-abc"},
             "status": {"initContainerStatuses": [{"name": "setup", "state": {"waiting": {"reason": "ImagePullBackOff"}}}]},
@@ -91,10 +99,12 @@ class FakeCluster:
     async def status(self, namespace, release):
         return self.releases.get(namespace)
 
-    async def install(self, namespace, release, chart, values_files, values):
+    async def install(self, namespace, release, chart, values_files, values, secret_values=None):
         if self.helm_error:
             raise HelmError(self.helm_error)
         self.installs.append((namespace, dict(values)))
+        if secret_values is not None:
+            self.server_installs.append((namespace, release, chart, dict(values), secret_values))
         self.releases[namespace] = "deployed"
 
     async def uninstall(self, namespace, release):
@@ -361,3 +371,131 @@ async def test_only_one_provisioner_works_at_a_time(pool, cluster, owner, tmp_pa
     assert "store-toys" in standby_cluster.namespaces
     waiting.cancel()
     await asyncio.gather(waiting, return_exceptions=True)
+
+
+# --- hosted servers: an image instead of a URL -------------------------------------
+
+
+async def new_hosted(pool, slug="notes", **spec) -> repo.Server:
+    from gateway.hosted import HostedSpec, url
+
+    described = HostedSpec(image="registry.test/notes-mcp:1.4", args=("serve",), env={"LOG_LEVEL": "debug"}, **spec)
+    return await repo.create_server(
+        pool, created_by=None, slug=slug, name="Notes", url=url(slug, described, "cluster.local"),
+        auth_type="bearer", auth_secret=CIPHER.encrypt("made-up-by-the-gateway"), hosted=described.to_json(),
+    )
+
+
+async def test_an_image_is_deployed_into_its_own_namespace_with_the_gateways_credential(pool, cluster, provisioner):
+    server = await new_hosted(pool, internet=True)
+    assert (server.hosted_status, server.url) == ("deploying", "http://server-mcp.mcp-notes.svc.cluster.local/mcp")
+    await settle(provisioner)
+
+    running = await repo.get_server(pool, server.id)
+    assert (running.hosted_status, running.hosted_detail) == ("running", None)
+    # Finishing counts as a change, so every gateway replica checks the server afresh.
+    assert running.updated_at > server.updated_at
+
+    labels = cluster.namespaces["mcp-notes"]["metadata"]["labels"]
+    assert labels == {"mcp-gateway/hosted": "notes", "pod-security.kubernetes.io/enforce": "restricted"}
+    assert cluster.bindings == [("mcp-notes", "gateway-store-installer", "gateway/gateway-provisioner")]
+
+    ((namespace, release, chart, on_command_line, given_privately),) = cluster.server_installs
+    assert (namespace, release, chart) == ("mcp-notes", "server", "/charts/mcp-server")
+    # The credential reaches helm on standard input only, never as an argument.
+    assert on_command_line == {}
+    assert given_privately["auth"] == {"enabled": True, "header": "Authorization", "token": "made-up-by-the-gateway"}
+    assert given_privately["image"] == {"reference": "registry.test/notes-mcp:1.4"}
+    assert given_privately["args"] == ["serve"] and given_privately["env"] == {"LOG_LEVEL": "debug"}
+    assert given_privately["networkPolicy"] == {"gateway": {"namespace": "gateway"}, "egress": {"internet": True}}
+
+
+async def test_an_image_that_never_starts_says_why_and_can_be_removed_meanwhile(pool, cluster, provisioner):
+    cluster.becomes_ready_after_checks = 10_000
+    server = await new_hosted(pool)
+    await provisioner.tick()
+    await asyncio.sleep(0.1)
+    stuck = await repo.get_server(pool, server.id)
+    assert (stuck.hosted_status, stuck.hosted_detail) == ("deploying", "Waiting for server-mcp (ImagePullBackOff)")
+
+    removing = await repo.mark_hosted_deleting(pool, server.id)
+    # Disabled in the same statement: the gateway stops offering it before anything is torn down.
+    assert (removing.hosted_status, removing.enabled) == ("deleting", False)
+    await settle(provisioner)
+    assert await repo.get_server(pool, server.id) is None
+    assert cluster.namespaces == {}
+
+
+async def test_a_deployment_that_times_out_fails_and_can_be_tried_again(pool, cluster, provisioner):
+    cluster.becomes_ready_after_checks = 10_000
+    server = await new_hosted(pool)
+    await pool.execute(
+        "UPDATE upstream_servers SET hosted_started_at = $2 WHERE id = $1", server.id, datetime.now(UTC) - timedelta(seconds=29.9)
+    )
+    await settle(provisioner)
+    failed = await repo.get_server(pool, server.id)
+    assert failed.hosted_status == "failed"
+    assert failed.hosted_detail == "Gave up after 0.5 minutes. Last seen: Waiting for server-mcp (ImagePullBackOff)"
+
+    cluster.ready.add("mcp-notes")
+    assert (await repo.redeploy_hosted(pool, server.id)).hosted_status == "deploying"
+    await settle(provisioner)
+    assert (await repo.get_server(pool, server.id)).hosted_status == "running"
+    assert len(cluster.namespaces) == 1
+
+
+async def test_changing_the_image_installs_again_and_an_older_attempt_steps_aside(pool, cluster, provisioner):
+    from gateway.hosted import HostedSpec
+
+    cluster.becomes_ready_after_checks = 10_000
+    server = await new_hosted(pool)
+    await provisioner.tick()
+    await asyncio.sleep(0.1)
+
+    newer = HostedSpec(image="registry.test/notes-mcp:1.5")
+    await repo.redeploy_hosted(pool, server.id, newer.to_json())
+    cluster.ready.add("mcp-notes")
+    await settle(provisioner)
+
+    assert (await repo.get_server(pool, server.id)).hosted_status == "running"
+    assert [install[4]["image"]["reference"] for install in cluster.server_installs] == [
+        "registry.test/notes-mcp:1.4", "registry.test/notes-mcp:1.5",
+    ]
+
+
+async def test_a_hosted_server_never_takes_over_a_namespace_that_is_not_its_own(pool, cluster, provisioner):
+    cluster.namespaces["mcp-servers"] = {"metadata": {"name": "mcp-servers", "labels": {}}, "status": {"phase": "Active"}}
+    server = await new_hosted(pool, slug="servers")
+    await settle(provisioner)
+    failed = await repo.get_server(pool, server.id)
+    assert failed.hosted_status == "failed" and "already exists" in failed.hosted_detail
+    assert cluster.server_installs == []
+
+    await repo.mark_hosted_deleting(pool, server.id)
+    await settle(provisioner)
+    assert await repo.get_server(pool, server.id) is None
+    assert cluster.namespaces["mcp-servers"]["status"]["phase"] == "Active"
+
+
+async def test_stores_and_hosted_servers_are_worked_on_side_by_side(pool, cluster, provisioner, owner):
+    store = await new_store(pool, owner)
+    server = await new_hosted(pool)
+    await settle(provisioner)
+    assert (await repo.get_store(pool, store.id)).status == "ready"
+    assert (await repo.get_server(pool, server.id)).hosted_status == "running"
+    assert set(cluster.namespaces) == {"store-books", "mcp-notes"}
+    # A server registered by URL is none of the provisioner's business.
+    assert {s.slug for s in await repo.list_hosted_work(pool)} == set()
+
+
+def test_a_container_kubernetes_refuses_to_start_is_reported_with_the_reason():
+    refused = workload("server-mcp", False)
+    pods = [{
+        "metadata": {"name": "server-mcp-5d"},
+        "status": {"containerStatuses": [{"name": "server", "state": {"waiting": {
+            "reason": "CreateContainerConfigError", "message": "container has runAsNonRoot and image will run as root",
+        }}}]},
+    }]
+    assert waiting_on([refused], pods) == [
+        "server-mcp (CreateContainerConfigError: container has runAsNonRoot and image will run as root)"
+    ]

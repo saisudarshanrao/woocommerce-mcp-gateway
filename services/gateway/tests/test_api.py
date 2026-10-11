@@ -599,3 +599,108 @@ async def test_a_stores_server_cannot_be_removed_by_hand_and_goes_when_the_store
 async def test_the_stores_api_is_absent_unless_switched_on(app, admin):
     assert (await admin.get("/api/stores")).status_code == 404
     assert (await admin.get("/api/config")).json()["stores_enabled"] is False
+
+
+# --- hosted servers --------------------------------------------------------------
+
+
+@pytest.fixture
+async def hosted_app(pool, database_url, upstreams):
+    settings = Settings(
+        database_url=database_url, encryption_key="test-encryption-key", public_url=BASE,
+        bootstrap_admin_email=ADMIN["email"], bootstrap_admin_password=ADMIN["password"], probe_interval_seconds=3600,
+        hosted_enabled=True, hosted_image_prefixes=("registry.test/",),
+    )
+    application = create_app(settings, http_client_factory=upstreams.http_client)
+    async with application.router.lifespan_context(application):
+        async with browser(application) as client:
+            await client.post("/api/auth/login", json=ADMIN)
+            yield application, client
+
+
+NOTES = {"slug": "notes", "name": "Notes", "hosted": {"image": "registry.test/notes-mcp:1.4", "args": ["serve"]}}
+
+
+async def test_an_admin_adds_a_server_by_image_and_the_gateway_supplies_address_and_credential(hosted_app, pool):
+    app, admin = hosted_app
+    created = await admin.post("/api/servers", json=NOTES)
+    assert created.status_code == 201, created.text
+    server = created.json()
+    assert server["url"] == "http://server-mcp.mcp-notes.svc.cluster.local/mcp"
+    assert server["auth"] == {"type": "bearer", "header": None, "credential_set": True}
+    assert server["hosted"]["status"] == "deploying" and server["hosted"]["image"] == "registry.test/notes-mcp:1.4"
+    assert server["hosted"]["namespace"] == "mcp-notes" and server["hosted"]["internet"] is False
+
+    # The credential was made up by the gateway, is stored encrypted, and is in no response.
+    row = await repo.get_server_by_slug(pool, "notes")
+    token = CIPHER.decrypt(row.auth_secret)
+    assert len(token) >= 40 and token not in created.text and token not in (await admin.get("/api/servers")).text
+
+    # A member sees that it is being deployed, and nothing about what or where.
+    bob = await invite_member(app, admin)
+    seen = next(s for s in (await bob.get("/api/servers")).json() if s["slug"] == "notes")
+    assert seen["hosted"] == {"status": "deploying", "detail": "Waiting for the provisioner"} and "url" not in seen
+    await bob.aclose()
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"url": "http://shop.test/mcp"}, "either the server's URL or an image"),
+        ({"hosted": None}, "either the server's URL or an image"),
+        ({"hosted": {"image": "docker.io/someone/else:1"}}, "Images must come from: registry.test/"),
+        ({"hosted": {"image": "registry.test/x y"}}, "does not look like a container image"),
+        ({"hosted": {"image": "registry.test/x:1", "env": {"AUTH_TOKEN": "mine"}}}, "set by the platform"),
+        ({"hosted": {"image": "registry.test/x:1", "path": "mcp"}}, "must start with /"),
+        ({"hosted": {"image": "registry.test/x:1", "port": 0}}, "port must be"),
+        ({"slug": "notes-"}, "cannot end with a hyphen"),
+    ],
+)
+async def test_a_deployment_that_cannot_be_accepted_is_refused_with_the_reason(hosted_app, change, reason):
+    _, admin = hosted_app
+    refused = await admin.post("/api/servers", json=NOTES | change)
+    assert refused.status_code == 422 and reason in refused.json()["detail"], refused.text
+
+
+async def test_without_a_provisioner_servers_can_only_be_added_by_url(app, admin):
+    refused = await admin.post("/api/servers", json=NOTES)
+    assert refused.status_code == 409 and "no provisioner" in refused.json()["detail"]
+    assert (await admin.get("/api/config")).json()["hosted_enabled"] is False
+
+
+async def test_a_hosted_server_can_be_renamed_redeployed_and_removed_but_not_repointed(hosted_app, pool):
+    _, admin = hosted_app
+    server = (await admin.post("/api/servers", json=NOTES)).json()
+    path = f"/api/servers/{server['id']}"
+    await pool.execute("UPDATE upstream_servers SET hosted_status = 'running', hosted_detail = NULL WHERE slug = 'notes'")
+
+    # Its address and credential are the platform's.
+    for change in ({"url": "http://shop.test/mcp"}, {"auth_type": "none"}, {"credential": "mine"}):
+        assert (await admin.patch(path, json=change)).status_code == 409, change
+    # Ordinary settings change without touching what is running.
+    renamed = (await admin.patch(path, json={"name": "Team notes", "member_access": "read_only"})).json()
+    assert (renamed["name"], renamed["hosted"]["status"]) == ("Team notes", "running")
+    # The same deployment again is not a change either.
+    assert (await admin.patch(path, json={"hosted": NOTES["hosted"]})).json()["hosted"]["status"] == "running"
+
+    # A new image, and a new path, mean a new deployment and a new address.
+    changed = (await admin.patch(path, json={"hosted": {"image": "registry.test/notes-mcp:1.5", "path": "/v2/mcp"}})).json()
+    assert changed["hosted"]["status"] == "deploying" and changed["hosted"]["image"].endswith(":1.5")
+    assert changed["url"] == "http://server-mcp.mcp-notes.svc.cluster.local/v2/mcp"
+
+    await pool.execute("UPDATE upstream_servers SET hosted_status = 'failed', hosted_detail = 'no such image' WHERE slug = 'notes'")
+    again = await admin.post(f"{path}/redeploy")
+    assert again.status_code == 200 and again.json()["hosted"]["status"] == "deploying"
+
+    assert (await admin.delete(path)).status_code == 204
+    leaving = next(s for s in (await admin.get("/api/servers")).json() if s["slug"] == "notes")
+    assert (leaving["hosted"]["status"], leaving["enabled"], leaving["status"]) == ("deleting", False, "disabled")
+    assert (await admin.patch(path, json={"name": "Too late"})).status_code == 409
+    assert (await admin.post(f"{path}/redeploy")).status_code == 409
+
+
+async def test_a_server_added_by_url_cannot_be_redeployed_or_turned_into_an_image(app, admin):
+    shop = next(s for s in (await admin.get("/api/servers")).json() if s["slug"] == "shop")
+    assert shop["hosted"] is None
+    assert (await admin.post(f"/api/servers/{shop['id']}/redeploy")).status_code == 409
+    assert (await admin.patch(f"/api/servers/{shop['id']}", json={"hosted": NOTES["hosted"]})).status_code == 409
